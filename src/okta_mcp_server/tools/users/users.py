@@ -39,6 +39,11 @@ async def list_users(
     Use fetch_all=True to automatically fetch all pages of results.
     By default, it will only fetch users whose status is not "DEPROVISIONED".
 
+    IMPORTANT — default page size:
+        When limit is NOT provided, the server defaults to 20 users per page.
+        ALWAYS omit the limit parameter unless the user explicitly requests a
+        different page size.
+
     Parameters:
         search (str, optional): The value of the search string when searching for some specific set of users.
         filter (str, optional): A filter string to filter users by Okta profile attributes.
@@ -47,12 +52,15 @@ async def list_users(
             NOTE: fetch_all is capped at 10 pages (2,000 users) to keep responses manageable.
             If the org has more users than the cap, the result will be partial. Always check
             pagination_info.stopped_early in the response — if True, the count is incomplete
-            and you MUST tell the user "at least N users were found; the result may be incomplete".
-            Never report a partial fetch_all count as the exact total.
+            and you MUST tell the user "at least N users were found; the result may be incomplete.
+            Use export_users_csv() for a complete export."
+            NEVER say the org has been "fully enumerated" or report the count as the exact total
+            when stopped_early is True.
             WARNING: For orgs with more than 2,000 users, use export_users_csv() instead —
             it writes directly to disk and handles any org size without response size limits.
         after (str, optional): Pagination cursor for fetching results after this point.
         limit (int, optional): Maximum number of users to return per page (min 20, max 200).
+            Default: 20.
         The search, filter, and q are performed on user profile attributes.
 
     Examples:
@@ -79,17 +87,20 @@ async def list_users(
         f"Search: '{search}', Filter: '{filter}', Q: '{q}', fetch_all: {fetch_all}, after: '{after}', limit: {limit}"
     )
 
+    # Enforce a consistent default page size when no limit is provided.
+    if limit is None:
+        limit = 20
+
     # Validate limit parameter range
     limit_clamped = None
-    if limit is not None:
-        if limit < 20:
-            logger.warning(f"Limit {limit} is below minimum (20), setting to 20")
-            limit_clamped = f"limit {limit} is below minimum (20); clamped to 20"
-            limit = 20
-        elif limit > 200:
-            logger.warning(f"Limit {limit} exceeds maximum (200), setting to 200")
-            limit_clamped = f"limit {limit} exceeds maximum (200); clamped to 200"
-            limit = 200
+    if limit < 20:
+        logger.warning(f"Limit {limit} is below minimum (20), setting to 20")
+        limit_clamped = f"limit {limit} is below minimum (20); clamped to 20"
+        limit = 20
+    elif limit > 200:
+        logger.warning(f"Limit {limit} exceeds maximum (200), setting to 200")
+        limit_clamped = f"limit {limit} exceeds maximum (200); clamped to 200"
+        limit = 200
 
     manager = ctx.request_context.lifespan_context.okta_auth_manager
 
@@ -152,16 +163,21 @@ async def list_users(
             # Surface this so the LLM can communicate it accurately to the user.
             if after:
                 result["pagination_note"] = (
-                    "fetch_all resumed from the provided 'after' cursor. "
+                    "IMPORTANT: fetch_all resumed from the provided 'after' cursor. "
                     f"'total_fetched' ({result['total_fetched']}) counts only the users fetched "
-                    "from that cursor onwards, not the total org count."
+                    "from that cursor onwards — NOT the total number of users in the org. "
+                    "You MUST NOT say the org has been 'fully enumerated' or report this as the total user count. "
+                    "Tell the user: 'Fetched N additional users from cursor onwards. "
+                    "The total org user count may be much higher.'"
                 )
             if pagination_info.get("stopped_early"):
                 result["warning"] = (
-                    f"fetch_all stopped early after {pagination_info['pages_fetched']} pages "
-                    f"({result['total_fetched']} users). The org has more users. "
+                    f"CRITICAL: fetch_all stopped early after {pagination_info['pages_fetched']} pages "
+                    f"({result['total_fetched']} users). The org almost certainly has MORE users. "
                     f"Reason: {pagination_info.get('stop_reason')}. "
-                    "Use export_users_csv() for a complete export of large orgs."
+                    "You MUST tell the user: 'At least {total} users were found but the result is INCOMPLETE. "
+                    "The org likely has more users. Use export_users_csv() for a complete export.' "
+                    "NEVER say the org has been 'fully enumerated' or report this count as the exact total."
                 )
             return result
         else:

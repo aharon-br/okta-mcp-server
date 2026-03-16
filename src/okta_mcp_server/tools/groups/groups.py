@@ -60,14 +60,17 @@ async def list_groups(
         f"Search: '{search}', Filter: '{filter}', Q: '{q}', fetch_all: {fetch_all}, after: '{after}', limit: {limit}"
     )
 
+    # Enforce a consistent default page size when no limit is provided.
+    if limit is None:
+        limit = 20
+
     # Validate limit parameter range
-    if limit is not None:
-        if limit < 20:
-            logger.warning(f"Limit {limit} is below minimum (20), setting to 20")
-            limit = 20
-        elif limit > 100:
-            logger.warning(f"Limit {limit} exceeds maximum (100), setting to 100")
-            limit = 100
+    if limit < 20:
+        logger.warning(f"Limit {limit} is below minimum (20), setting to 20")
+        limit = 20
+    elif limit > 100:
+        logger.warning(f"Limit {limit} exceeds maximum (100), setting to 100")
+        limit = 100
 
     manager = ctx.request_context.lifespan_context.okta_auth_manager
 
@@ -370,14 +373,17 @@ async def list_group_users(
     logger.info(f"Listing users in group: {group_id}")
     logger.debug(f"fetch_all: {fetch_all}, after: '{after}', limit: {limit}")
 
+    # Enforce a consistent default page size when no limit is provided.
+    if limit is None:
+        limit = 20
+
     # Validate limit parameter range
-    if limit is not None:
-        if limit < 20:
-            logger.warning(f"Limit {limit} is below minimum (20), setting to 20")
-            limit = 20
-        elif limit > 100:
-            logger.warning(f"Limit {limit} exceeds maximum (100), setting to 100")
-            limit = 100
+    if limit < 20:
+        logger.warning(f"Limit {limit} is below minimum (20), setting to 20")
+        limit = 20
+    elif limit > 100:
+        logger.warning(f"Limit {limit} exceeds maximum (100), setting to 100")
+        limit = 100
 
     manager = ctx.request_context.lifespan_context.okta_auth_manager
 

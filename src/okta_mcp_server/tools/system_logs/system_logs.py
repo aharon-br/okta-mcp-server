@@ -155,6 +155,26 @@ async def get_logs(
             logger.warning(f"Limit {limit} exceeds maximum (100), setting to 100")
             limit = 100
 
+    # Detect MFA-related eventType filters that should use outcome.result eq "CHALLENGE" instead
+    _MFA_EVENT_TYPE_PATTERN = re.compile(
+        r'eventType\s+eq\s+["\'].*(?:mfa|factor|verify|challenge|step.?up|authentication).*["\']',
+        re.IGNORECASE,
+    )
+    if filter and _MFA_EVENT_TYPE_PATTERN.search(filter):
+        has_challenge_filter = bool(
+            re.search(r'outcome\.result\s+eq\s+["\']CHALLENGE["\']', filter, re.IGNORECASE)
+        )
+        if not has_challenge_filter:
+            return {
+                "error": (
+                    "Incorrect filter for MFA challenge queries. "
+                    "Do NOT use eventType filters for MFA challenges. "
+                    "You MUST use: filter='outcome.result eq \"CHALLENGE\"' "
+                    "(optionally combined with actor.id). "
+                    "Retry the call with the correct filter."
+                )
+            }
+
     # Validate outcome.result value if present in filter
     _VALID_OUTCOME_RESULTS = {"SUCCESS", "FAILURE", "DENY", "ALLOW", "CHALLENGE", "UNKNOWN"}
     if filter:
@@ -201,16 +221,22 @@ async def get_logs(
         return None
 
     def _add_failure_deny_reminder(result: dict) -> None:
-        """Mutate result in-place: add a reminder when only FAILURE or only DENY was queried."""
-        filter_upper = (filter or "").upper()
-        if "FAILURE" in filter_upper and "DENY" not in filter_upper:
+        """Mutate result in-place: add a reminder when only FAILURE or only DENY was queried.
+
+        Uses precise regex matching on outcome.result values to avoid false positives
+        when DENY/FAILURE appear in unrelated parts of the filter (e.g. eventType names).
+        """
+        filter_str = filter or ""
+        has_failure = bool(re.search(r'outcome\.result\s+eq\s+["\']FAILURE["\']', filter_str, re.IGNORECASE))
+        has_deny = bool(re.search(r'outcome\.result\s+eq\s+["\']DENY["\']', filter_str, re.IGNORECASE))
+        if has_failure and not has_deny:
             result["reminder"] = (
                 "FAILURE results fetched. You MUST NOW make a second separate call: "
                 "get_logs(filter='outcome.result eq \"DENY\"', fetch_all=True, since=..., until=...) "
                 "— policy-blocked sign-ins are a completely separate outcome and will NOT appear "
                 "in FAILURE results. Skipping this call is a bug."
             )
-        elif "DENY" in filter_upper and "FAILURE" not in filter_upper:
+        elif has_deny and not has_failure:
             result["reminder"] = (
                 "DENY results fetched. You MUST NOW make a second separate call: "
                 "get_logs(filter='outcome.result eq \"FAILURE\"', fetch_all=True, since=..., until=...) "
