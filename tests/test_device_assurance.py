@@ -20,6 +20,7 @@ from okta_mcp_server.tools.device_assurance.device_assurance import (
     _enrich_policy_with_attribute_status,
     _get_implication,
     _validate_os_version,
+    _validate_platform_attributes,
     create_device_assurance_policy,
     get_device_assurance_policy,
     list_device_assurance_policies,
@@ -136,11 +137,28 @@ class TestValidateOsVersion:
         assert _validate_os_version(data) is None
         assert data["osVersion"]["minimum"] == "14.2.0"
 
-    def test_single_component_returns_error(self):
+    def test_single_component_returns_error_without_platform(self):
+        # No platform key — Android special-case must NOT apply
         error = _validate_os_version({"osVersion": {"minimum": "14"}})
         assert error is not None
         assert "Invalid" in error
         assert "14" in error
+
+    def test_single_component_returns_error_for_non_android_platform(self):
+        error = _validate_os_version({"platform": "MACOS", "osVersion": {"minimum": "14"}})
+        assert error is not None
+        assert "Invalid" in error
+
+    def test_android_single_component_is_accepted_as_is(self):
+        data = {"platform": "ANDROID", "osVersion": {"minimum": "12"}}
+        assert _validate_os_version(data) is None
+        # Android major-only versions must not be normalised — Okta API expects "12", not "12.0.0"
+        assert data["osVersion"]["minimum"] == "12"
+
+    def test_android_single_component_zero_is_accepted_as_is(self):
+        data = {"platform": "ANDROID", "osVersion": {"minimum": "9"}}
+        assert _validate_os_version(data) is None
+        assert data["osVersion"]["minimum"] == "9"
 
     def test_alpha_component_returns_error(self):
         error = _validate_os_version({"osVersion": {"minimum": "14.2.alpha"}})
@@ -163,10 +181,122 @@ class TestValidateOsVersion:
         assert error is not None
         assert "X.Y" in error
 
+    def test_android_hint_in_error_message(self):
+        # The error message should hint that Android accepts single-component versions
+        error = _validate_os_version({"platform": "MACOS", "osVersion": {"minimum": "14"}})
+        assert error is not None
+        assert "Android" in error
+
 
 # ===========================================================================
-# _enrich_policy_with_attribute_status
+# _validate_platform_attributes
 # ===========================================================================
+
+class TestValidatePlatformAttributes:
+    """Tests for the _validate_platform_attributes helper."""
+
+    # --- Valid combinations should return None ---
+
+    def test_returns_none_when_no_platform(self):
+        assert _validate_platform_attributes({"diskEncryptionType": {"include": ["ALL_INTERNAL_VOLUMES"]}}) is None
+
+    def test_returns_none_for_macos_with_valid_attributes(self):
+        data = {
+            "platform": "MACOS",
+            "osVersion": {"minimum": "14.0.0"},
+            "diskEncryptionType": {"include": ["ALL_INTERNAL_VOLUMES"]},
+            "screenLockType": {"include": ["BIOMETRIC"]},
+            "secureHardwarePresent": True,
+        }
+        assert _validate_platform_attributes(data) is None
+
+    def test_returns_none_for_android_with_jailbreak_false(self):
+        data = {"platform": "ANDROID", "jailbreak": False, "screenLockType": {"include": ["BIOMETRIC"]}}
+        assert _validate_platform_attributes(data) is None
+
+    def test_returns_none_for_ios_with_jailbreak_false(self):
+        data = {"platform": "IOS", "jailbreak": False}
+        assert _validate_platform_attributes(data) is None
+
+    def test_returns_none_for_chromeos_with_only_os_version(self):
+        assert _validate_platform_attributes({"platform": "CHROMEOS", "osVersion": {"minimum": "115.0.0"}}) is None
+
+    # --- Platform/attribute incompatibilities ---
+
+    def test_chromeos_with_disk_encryption_returns_error(self):
+        data = {"platform": "CHROMEOS", "diskEncryptionType": {"include": ["ALL_INTERNAL_VOLUMES"]}}
+        error = _validate_platform_attributes(data)
+        assert error is not None
+        assert "diskEncryptionType" in error
+        assert "CHROMEOS" in error
+
+    def test_macos_with_jailbreak_returns_error(self):
+        data = {"platform": "MACOS", "jailbreak": False}
+        error = _validate_platform_attributes(data)
+        assert error is not None
+        assert "jailbreak" in error
+        assert "MACOS" in error
+
+    def test_android_with_disk_encryption_returns_error(self):
+        data = {"platform": "ANDROID", "diskEncryptionType": {"include": ["ALL_INTERNAL_VOLUMES"]}}
+        error = _validate_platform_attributes(data)
+        assert error is not None
+        assert "diskEncryptionType" in error
+
+    def test_ios_with_secure_hardware_returns_error(self):
+        data = {"platform": "IOS", "secureHardwarePresent": True}
+        error = _validate_platform_attributes(data)
+        assert error is not None
+        assert "secureHardwarePresent" in error
+
+    def test_windows_with_jailbreak_returns_error(self):
+        data = {"platform": "WINDOWS", "jailbreak": False}
+        error = _validate_platform_attributes(data)
+        assert error is not None
+        assert "jailbreak" in error
+
+    def test_error_message_includes_supported_platforms(self):
+        data = {"platform": "CHROMEOS", "diskEncryptionType": {"include": ["ALL_INTERNAL_VOLUMES"]}}
+        error = _validate_platform_attributes(data)
+        assert "MACOS" in error
+        assert "WINDOWS" in error
+
+    def test_error_message_includes_remove_hint(self):
+        data = {"platform": "IOS", "secureHardwarePresent": True}
+        error = _validate_platform_attributes(data)
+        assert "Remove" in error
+
+    # --- jailbreak=True validation ---
+
+    def test_jailbreak_true_on_android_returns_error(self):
+        data = {"platform": "ANDROID", "jailbreak": True}
+        error = _validate_platform_attributes(data)
+        assert error is not None
+        assert "jailbreak" in error
+        assert "false" in error.lower()
+
+    def test_jailbreak_true_on_ios_returns_error(self):
+        data = {"platform": "IOS", "jailbreak": True}
+        error = _validate_platform_attributes(data)
+        assert error is not None
+        assert "jailbreak" in error
+        assert "false" in error.lower()
+
+    def test_jailbreak_false_on_android_is_valid(self):
+        # False is the only accepted value — must not be rejected
+        assert _validate_platform_attributes({"platform": "ANDROID", "jailbreak": False}) is None
+
+    def test_multiple_invalid_attributes_returns_combined_error(self):
+        data = {
+            "platform": "CHROMEOS",
+            "diskEncryptionType": {"include": ["ALL_INTERNAL_VOLUMES"]},
+            "secureHardwarePresent": True,
+        }
+        error = _validate_platform_attributes(data)
+        assert error is not None
+        assert "diskEncryptionType" in error
+        assert "secureHardwarePresent" in error
+
 
 class TestEnrichPolicyWithAttributeStatus:
     """Tests for the _enrich_policy_with_attribute_status helper."""

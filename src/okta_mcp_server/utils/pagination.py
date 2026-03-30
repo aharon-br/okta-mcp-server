@@ -6,6 +6,7 @@
 # See the License for the specific language governing permissions and limitations under the License.
 
 import asyncio
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
@@ -24,8 +25,6 @@ def extract_after_cursor(response) -> Optional[str]:
     Returns:
         str: The 'after' cursor value, or None if no next page
     """
-    import re
-
     # --- Okta SDK v3: ApiResponse with Link header ---
     if response and hasattr(response, "headers") and response.headers:
         link_header = ""
