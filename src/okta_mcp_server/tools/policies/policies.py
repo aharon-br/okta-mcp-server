@@ -66,15 +66,13 @@ async def list_policies(
 
     try:
         okta_client = await get_okta_client(manager)
-        params = {"type": type, "limit": limit}
+        params = {"type": type, "limit": str(limit)}
         if status:
             params["status"] = status
         if q:
             params["q"] = q
         if after:
             params["after"] = after
-        if "limit" in params and params["limit"] is not None:
-            params["limit"] = str(params["limit"])
 
         logger.debug("Calling Okta API to list policies")
         policies, _, err = await okta_client.list_policies(**params)

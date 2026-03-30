@@ -26,6 +26,9 @@ _SEMVER_PATTERN = re.compile(r"^\d+\.\d+(\.\d+(\.\d+)?)?$")
 # Matches two-component versions (X.Y) that need normalising to X.Y.0
 _TWO_COMPONENT_VERSION = re.compile(r"^\d+\.\d+$")
 
+# Matches single-component versions (X) — valid for Android major-only OS versions
+_SINGLE_COMPONENT_VERSION = re.compile(r"^\d+$")
+
 # Security-relevant attributes that can be configured per platform.
 # If an attribute is expected for a platform but absent from the API response,
 # it means the organisation has NOT configured that check — not that it passed.
@@ -101,6 +104,10 @@ def _validate_os_version(policy_data: Dict[str, Any]) -> Optional[str]:
     Accepts X.Y, X.Y.Z, and X.Y.Z.W formats. Two-component versions (X.Y)
     are automatically normalised to X.Y.0 in-place before being sent to the API.
 
+    Android exception: single-component major versions (e.g. "12") are accepted
+    and passed through as-is — the Okta API expects the raw major version for Android
+    and rejects normalised forms like "12.0.0".
+
     Returns an error message string if validation fails, None if valid.
     """
     os_version = policy_data.get("osVersion") or policy_data.get("os_version")
@@ -111,11 +118,20 @@ def _validate_os_version(policy_data: Dict[str, Any]) -> Optional[str]:
     if not minimum:
         return None
 
+    platform = (policy_data.get("platform") or "").upper()
+
+    # Android accepts single-component major versions (e.g. "12").
+    # The Okta API for Android expects the major version as-is (e.g. "12"), not "12.0.0".
+    if platform == "ANDROID" and _SINGLE_COMPONENT_VERSION.match(minimum):
+        logger.debug(f"Android OS version '{minimum}' accepted as-is (major version)")
+        return None
+
     if not _SEMVER_PATTERN.match(minimum):
         return (
             f"Invalid OS version format: '{minimum}'. "
             f"Version must be in X.Y, X.Y.Z, or X.Y.Z.W format "
-            f"(e.g., '14.2', '14.2.1', '14.2.1.0')."
+            f"(e.g., '14.2', '14.2.1', '14.2.1.0'). "
+            f"For Android, a major version only (e.g. '12') is also accepted."
         )
 
     # Normalise X.Y → X.Y.0 so the Okta API always receives a full three-component version.
@@ -143,6 +159,11 @@ def _validate_platform_attributes(policy_data: Dict[str, Any]) -> Optional[str]:
                 errors.append(
                     f"'{attr}' is not supported for {platform} — "
                     f"only available on: {', '.join(supported_platforms)}."
+                )
+            elif attr == "jailbreak" and policy_data.get(attr) is True:
+                errors.append(
+                    "The 'jailbreak' attribute currently only accepts the value false. "
+                    "Set jailbreak to false or omit the field entirely."
                 )
 
     if errors:
