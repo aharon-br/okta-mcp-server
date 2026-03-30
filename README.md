@@ -28,7 +28,7 @@ This server is an [Model Context Protocol](https://modelcontextprotocol.io/intro
 * **Extensible Architecture:** Designed to be easily extended with new functionalities and support for additional Okta API endpoints.
 * **Comprehensive Tool Support:** Full CRUD operations for users, groups, applications, policies, device assurance policies, and more.
 
-This MCP server utilizes [Okta's Python SDK](https://github.com/okta/okta-sdk-python) to communicate with the Okta APIs, ensuring a robust and well-supported integration.
+This MCP server utilizes [Okta's Python SDK v3.3.0](https://github.com/okta/okta-sdk-python) to communicate with the Okta APIs, ensuring a robust and well-supported integration.
 
 ## 🚀 Getting Started
 
