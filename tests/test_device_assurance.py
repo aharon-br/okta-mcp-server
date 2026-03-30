@@ -390,6 +390,8 @@ class TestListDeviceAssurancePolicies:
         assert len(result["policies"]) == 1
         assert "securityAttributeStatus" in result["policies"][0]
         assert result["policies"][0]["platform"] == "MACOS"
+        assert "retrieved_at" in result
+        assert "note" in result
 
     @pytest.mark.asyncio
     @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
@@ -405,6 +407,8 @@ class TestListDeviceAssurancePolicies:
         result = await list_device_assurance_policies(ctx=ctx_no_elicitation)
 
         assert len(result["policies"]) == 2
+        assert "retrieved_at" in result
+        assert "note" in result
 
     @pytest.mark.asyncio
     @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
@@ -415,7 +419,29 @@ class TestListDeviceAssurancePolicies:
 
         result = await list_device_assurance_policies(ctx=ctx_no_elicitation)
 
-        assert result == {"policies": []}
+        assert result["policies"] == []
+        assert "retrieved_at" in result
+        assert "note" in result
+
+    @pytest.mark.asyncio
+    @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
+    async def test_none_policies_transient_returns_warning_with_metadata(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        """When the SDK returns (None, 2xx_resp, None), the response must include
+        the transient-retry warning, retrieved_at, and note fields."""
+        client = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        client.list_device_assurance_policies.return_value = (None, mock_resp, None)
+        mock_get_client.return_value = client
+
+        result = await list_device_assurance_policies(ctx=ctx_no_elicitation)
+
+        assert result["policies"] == []
+        assert "warning" in result
+        assert "retrieved_at" in result
+        assert "note" in result
 
     @pytest.mark.asyncio
     @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
