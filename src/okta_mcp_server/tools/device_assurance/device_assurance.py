@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 from mcp.server.fastmcp import Context
-
+from okta.exceptions.exceptions import ForbiddenException, UnauthorizedException
 from okta.models.device_assurance import DeviceAssurance
 
 from okta_mcp_server.server import mcp
@@ -46,6 +46,52 @@ _PLATFORM_ONLY_ATTRIBUTES: Dict[str, List[str]] = {
     "jailbreak": ["ANDROID", "IOS"],
     "screenLockType": ["ANDROID", "IOS", "MACOS", "WINDOWS"],
 }
+
+
+def _build_scope_error(operation: str, status: int = 403) -> Dict[str, str]:
+    """Return a user-friendly error dict when the API rejects a request due to missing scope.
+
+    Args:
+        operation: Human-readable verb describing what was attempted
+                   (e.g. ``"list"``, ``"create"``, ``"delete"``).  Used to pick
+                   the appropriate scope hint.
+        status:    HTTP status code returned by Okta (typically 401 or 403).
+    """
+    if operation in ("create", "replace", "delete"):
+        scope_hint = "okta.deviceAssurance.manage"
+    else:
+        scope_hint = "okta.deviceAssurance.read"
+    return {
+        "error": (
+            f"The Okta API call was blocked by permissions (HTTP {status}). "
+            f"Missing required OAuth scope for Device Assurance Policies: '{scope_hint}'. "
+            f"First, check your MCP configuration (mcp.json) and ensure your OKTA_SCOPES includes '{scope_hint}'. "
+            f"Then grant the scope to your Okta OIDC app and re-authenticate before retrying."
+        )
+    }
+
+
+def _get_configured_scopes(manager: Any) -> Optional[set[str]]:
+    """Extract the configured OAuth scopes from the auth manager.
+
+    This is intentionally based on the *configured* scopes (OKTA_SCOPES / manager.scopes),
+    not the cached access token, to avoid coupling tool behavior to local keychain state
+    and to keep unit tests deterministic.
+
+    Returns:
+        - set[str] if scopes could be read
+        - None if the manager does not expose scopes (e.g., test doubles)
+    """
+    scopes_str = getattr(manager, "scopes", None)
+    if not scopes_str or not isinstance(scopes_str, str):
+        return None
+    return set(scopes_str.split())
+
+
+def _missing_required_scope(required_scope: str, manager: Any) -> bool:
+    """Return True when the configured scope set is known and missing the required scope."""
+    configured = _get_configured_scopes(manager)
+    return configured is not None and required_scope not in configured
 
 
 def _validate_os_version(policy_data: Dict[str, Any]) -> Optional[str]:
@@ -225,23 +271,44 @@ async def list_device_assurance_policies(ctx: Context) -> Dict[str, Any]:
             - warning (str): Present if the API returned an unexpected empty
               response; the caller should retry.
             - error (str): Error message if the operation fails.
+
+    Scope/permission errors:
+        If the Okta API returns HTTP 401/403 (commonly due to missing OAuth scopes),
+        this tool returns ``{"error": "..."}``.
+        In that case, present the error message verbatim and STOP — do not retry
+        and do not attempt follow-up actions until scopes are fixed.
     """
     logger.info("Listing device assurance policies")
 
     manager = ctx.request_context.lifespan_context.okta_auth_manager
 
+    # Scope precheck: if we can determine the token lacks the required scope,
+    # return the error immediately and do nothing else.
+    if _missing_required_scope("okta.deviceAssurance.read", manager):
+        return _build_scope_error("list", 403)
+
     try:
         okta_client = await get_okta_client(manager)
-        policies, _, err = await okta_client.list_device_assurance_policies()
+        policies, resp, err = await okta_client.list_device_assurance_policies()
 
         if err:
             logger.error(f"Error listing device assurance policies: {err}")
+            if hasattr(err, "status") and err.status in (401, 403):
+                return _build_scope_error("list", err.status)
             return {"error": str(err)}
 
         # The SDK occasionally returns None on the first call after server start
         # (auth initialisation race). Distinguish None (transient — advise retry)
         # from an empty list (genuinely no policies configured).
+        # A 4xx status with an empty body is also surfaced here — treat it as a
+        # permission/scope error rather than a transient issue.
         if policies is None:
+            if resp is not None and hasattr(resp, "status_code") and resp.status_code in (401, 403):
+                logger.error(
+                    f"list_device_assurance_policies returned HTTP {resp.status_code} "
+                    "with empty body — likely a missing scope."
+                )
+                return _build_scope_error("list", resp.status_code)
             logger.warning(
                 "SDK returned None for list_device_assurance_policies — "
                 "likely a transient auth initialisation issue."
@@ -268,6 +335,9 @@ async def list_device_assurance_policies(ctx: Context) -> Dict[str, Any]:
             ]
         }
 
+    except (ForbiddenException, UnauthorizedException) as e:
+        logger.error(f"Access denied listing device assurance policies: {e}")
+        return _build_scope_error("list", e.status)
     except Exception as e:
         logger.error(f"Exception listing device assurance policies: {e}")
         return {"error": str(e)}
@@ -296,9 +366,18 @@ async def get_device_assurance_policy(
 
     Returns:
         Dict containing the full policy details, or an error dict.
+
+    Scope/permission errors:
+        If the Okta API returns HTTP 401/403 (commonly due to missing OAuth scopes),
+        this tool returns ``{"error": "..."}``.
+        In that case, present the error message verbatim and STOP — do not retry
+        and do not attempt follow-up actions until scopes are fixed.
     """
     logger.info(f"Getting device assurance policy {device_assurance_id}")
     manager = ctx.request_context.lifespan_context.okta_auth_manager
+
+    if _missing_required_scope("okta.deviceAssurance.read", manager):
+        return _build_scope_error("get", 403)
 
     try:
         okta_client = await get_okta_client(manager)
@@ -306,12 +385,17 @@ async def get_device_assurance_policy(
 
         if err:
             logger.error(f"Error getting device assurance policy {device_assurance_id}: {err}")
+            if hasattr(err, "status") and err.status in (401, 403):
+                return _build_scope_error("get", err.status)
             return {"error": str(err)}
 
         if not policy:
             return None
         return _enrich_policy_with_attribute_status(policy.to_dict())
 
+    except (ForbiddenException, UnauthorizedException) as e:
+        logger.error(f"Access denied getting device assurance policy {device_assurance_id}: {e}")
+        return _build_scope_error("get", e.status)
     except Exception as e:
         logger.error(f"Exception getting device assurance policy {device_assurance_id}: {e}")
         return {"error": str(e)}
@@ -349,9 +433,18 @@ async def create_device_assurance_policy(
 
     Returns:
         Dict containing the created policy details, or an error dict.
+
+    Scope/permission errors:
+        If the Okta API returns HTTP 401/403 (commonly due to missing OAuth scopes),
+        this tool returns ``{"error": "..."}``.
+        In that case, present the error message verbatim and STOP — do not retry
+        and do not attempt follow-up actions until scopes are fixed.
     """
     logger.info("Creating new device assurance policy")
     manager = ctx.request_context.lifespan_context.okta_auth_manager
+
+    if _missing_required_scope("okta.deviceAssurance.manage", manager):
+        return _build_scope_error("create", 403)
 
     try:
         version_error = _validate_os_version(policy_data)
@@ -368,11 +461,16 @@ async def create_device_assurance_policy(
 
         if err:
             logger.error(f"Error creating device assurance policy: {err}")
+            if hasattr(err, "status") and err.status in (401, 403):
+                return _build_scope_error("create", err.status)
             return {"error": str(err)}
 
         logger.info(f"Successfully created device assurance policy {policy.id if policy else 'unknown'}")
         return policy.to_dict() if policy else None
 
+    except (ForbiddenException, UnauthorizedException) as e:
+        logger.error(f"Access denied creating device assurance policy: {e}")
+        return _build_scope_error("create", e.status)
     except Exception as e:
         logger.error(f"Exception creating device assurance policy: {e}")
         return {"error": str(e)}
@@ -425,9 +523,18 @@ async def replace_device_assurance_policy(
             - changes (List[Dict]): List of changed attributes, each with
               attribute name, before/after values, and security implication.
             - error (str): Error message if the operation fails.
+
+    Scope/permission errors:
+        If the Okta API returns HTTP 401/403 (commonly due to missing OAuth scopes),
+        this tool returns ``{"error": "..."}``.
+        In that case, present the error message verbatim and STOP — do not retry
+        and do not attempt follow-up actions until scopes are fixed.
     """
     logger.info(f"Replacing device assurance policy {device_assurance_id}")
     manager = ctx.request_context.lifespan_context.okta_auth_manager
+
+    if _missing_required_scope("okta.deviceAssurance.manage", manager):
+        return _build_scope_error("replace", 403)
 
     try:
         version_error = _validate_os_version(policy_data)
@@ -448,6 +555,8 @@ async def replace_device_assurance_policy(
             logger.error(
                 f"Error fetching current device assurance policy {device_assurance_id}: {fetch_err}"
             )
+            if hasattr(fetch_err, "status") and fetch_err.status in (401, 403):
+                return _build_scope_error("replace", fetch_err.status)
             return {"error": str(fetch_err)}
 
         before_state = _enrich_policy_with_attribute_status(
@@ -461,6 +570,8 @@ async def replace_device_assurance_policy(
 
         if err:
             logger.error(f"Error replacing device assurance policy {device_assurance_id}: {err}")
+            if hasattr(err, "status") and err.status in (401, 403):
+                return _build_scope_error("replace", err.status)
             return {"error": str(err)}
 
         if not policy:
@@ -476,6 +587,9 @@ async def replace_device_assurance_policy(
             "changes": changes,
         }
 
+    except (ForbiddenException, UnauthorizedException) as e:
+        logger.error(f"Access denied replacing device assurance policy {device_assurance_id}: {e}")
+        return _build_scope_error("replace", e.status)
     except Exception as e:
         logger.error(f"Exception replacing device assurance policy {device_assurance_id}: {e}")
         return {"error": str(e)}
@@ -497,8 +611,21 @@ async def delete_device_assurance_policy(
 
     Returns:
         Dict with success status or cancellation message.
+
+    Scope/permission errors:
+        If the Okta API returns HTTP 401/403 (commonly due to missing OAuth scopes),
+        this tool returns ``{"error": "..."}``.
+        In that case, present the error message verbatim and STOP — do not retry
+        and do not attempt follow-up actions until scopes are fixed.
     """
     logger.warning(f"Deletion requested for device assurance policy {device_assurance_id}")
+
+    manager = ctx.request_context.lifespan_context.okta_auth_manager
+
+    # Scope precheck must happen before elicitation so we don't prompt for
+    # confirmation when the operation cannot succeed.
+    if _missing_required_scope("okta.deviceAssurance.manage", manager):
+        return _build_scope_error("delete", 403)
 
     outcome = await elicit_or_fallback(
         ctx,
@@ -511,8 +638,6 @@ async def delete_device_assurance_policy(
         logger.info(f"Device assurance policy deletion cancelled for {device_assurance_id}")
         return {"message": "Device assurance policy deletion cancelled by user."}
 
-    manager = ctx.request_context.lifespan_context.okta_auth_manager
-
     try:
         okta_client = await get_okta_client(manager)
         result = await okta_client.delete_device_assurance_policy(device_assurance_id)
@@ -520,6 +645,8 @@ async def delete_device_assurance_policy(
 
         if err:
             logger.error(f"Error deleting device assurance policy {device_assurance_id}: {err}")
+            if hasattr(err, "status") and err.status in (401, 403):
+                return _build_scope_error("delete", err.status)
             return {"error": str(err)}
 
         logger.info(f"Device assurance policy {device_assurance_id} deleted successfully")
@@ -528,6 +655,9 @@ async def delete_device_assurance_policy(
             "message": f"Device assurance policy {device_assurance_id} deleted successfully",
         }
 
+    except (ForbiddenException, UnauthorizedException) as e:
+        logger.error(f"Access denied deleting device assurance policy {device_assurance_id}: {e}")
+        return _build_scope_error("delete", e.status)
     except Exception as e:
         logger.error(f"Exception deleting device assurance policy {device_assurance_id}: {e}")
         return {"error": str(e)}
