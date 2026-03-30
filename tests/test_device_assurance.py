@@ -12,8 +12,10 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from okta.exceptions.exceptions import ForbiddenException, UnauthorizedException
 
 from okta_mcp_server.tools.device_assurance.device_assurance import (
+    _build_scope_error,
     _compute_policy_diff,
     _enrich_policy_with_attribute_status,
     _get_implication,
@@ -52,6 +54,56 @@ def _make_policy_model(policy_dict: dict) -> MagicMock:
     mock = MagicMock()
     mock.to_dict.return_value = policy_dict.copy()
     return mock
+
+
+def _make_forbidden_exception(status: int = 403) -> ForbiddenException:
+    """Create a minimal ForbiddenException / UnauthorizedException for testing."""
+    exc = ForbiddenException.__new__(ForbiddenException)
+    exc.status = status
+    exc.reason = "Forbidden" if status == 403 else "Unauthorized"
+    exc.body = None
+    exc.data = None
+    exc.headers = None
+    return exc
+
+
+# ===========================================================================
+# _build_scope_error
+# ===========================================================================
+
+class TestBuildScopeError:
+    """Tests for the _build_scope_error helper."""
+
+    def test_read_operation_mentions_read_scope(self):
+        result = _build_scope_error("list")
+        assert "okta.deviceAssurance.read" in result["error"]
+
+    def test_write_operation_mentions_manage_scope(self):
+        for op in ("create", "replace", "delete"):
+            result = _build_scope_error(op)
+            assert "okta.deviceAssurance.manage" in result["error"], f"Failed for operation: {op}"
+
+    def test_status_code_is_included_in_message(self):
+        result = _build_scope_error("list", status=401)
+        assert "401" in result["error"]
+
+    def test_mentions_permissions_blocked(self):
+        result = _build_scope_error("list", status=403)
+        assert "blocked by permissions" in result["error"].lower()
+
+    def test_mentions_device_assurance(self):
+        result = _build_scope_error("list", status=403)
+        assert "device assurance" in result["error"].lower()
+
+    def test_mentions_mcp_config_scopes(self):
+        result = _build_scope_error("list", status=403)
+        assert "mcp.json" in result["error"].lower()
+        assert "okta_scopes" in result["error"].lower()
+
+    def test_returns_dict_with_error_key(self):
+        result = _build_scope_error("list")
+        assert "error" in result
+        assert isinstance(result["error"], str)
 
 
 # ===========================================================================
@@ -385,6 +437,88 @@ class TestListDeviceAssurancePolicies:
 
         assert "error" in result
 
+    @pytest.mark.asyncio
+    @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
+    async def test_forbidden_exception_returns_scope_error(self, mock_get_client, ctx_no_elicitation):
+        """A ForbiddenException (403 with JSON body) should surface a clear scope error."""
+        mock_get_client.side_effect = _make_forbidden_exception(403)
+
+        result = await list_device_assurance_policies(ctx=ctx_no_elicitation)
+
+        assert "error" in result
+        assert "403" in result["error"]
+        assert "okta.deviceAssurance.read" in result["error"]
+
+    @pytest.mark.asyncio
+    @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
+    async def test_unauthorised_exception_returns_scope_error(self, mock_get_client, ctx_no_elicitation):
+        """An UnauthorizedException (401) should also surface a clear scope error."""
+        exc = ForbiddenException.__new__(UnauthorizedException)
+        exc.status = 401
+        exc.reason = "Unauthorized"
+        exc.body = None
+        exc.data = None
+        exc.headers = None
+        mock_get_client.side_effect = exc
+
+        result = await list_device_assurance_policies(ctx=ctx_no_elicitation)
+
+        assert "error" in result
+        assert "401" in result["error"]
+
+    @pytest.mark.asyncio
+    @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
+    async def test_none_policies_with_403_response_returns_scope_error(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        """When the SDK returns (None, resp, None) with a 403 status (empty 403 body),
+        the tool must return a scope error rather than the transient-retry warning."""
+        client = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        client.list_device_assurance_policies.return_value = (None, mock_resp, None)
+        mock_get_client.return_value = client
+
+        result = await list_device_assurance_policies(ctx=ctx_no_elicitation)
+
+        assert "error" in result
+        assert "403" in result["error"]
+        assert "okta.deviceAssurance.read" in result["error"]
+
+    @pytest.mark.asyncio
+    @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
+    async def test_none_policies_with_401_response_returns_scope_error(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        client = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        client.list_device_assurance_policies.return_value = (None, mock_resp, None)
+        mock_get_client.return_value = client
+
+        result = await list_device_assurance_policies(ctx=ctx_no_elicitation)
+
+        assert "error" in result
+        assert "401" in result["error"]
+
+    @pytest.mark.asyncio
+    @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
+    async def test_scope_precheck_short_circuits_without_api_call(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        """If the cached token clearly lacks okta.policies.read, the tool should return
+        the scope error immediately and not attempt any API call.
+        """
+        # Configure the fake auth manager to expose a scopes string
+        # that is missing okta.deviceAssurance.read.
+        ctx_no_elicitation.request_context.lifespan_context.okta_auth_manager.scopes = "okta.users.read"
+
+        result = await list_device_assurance_policies(ctx=ctx_no_elicitation)
+
+        assert "error" in result
+        assert "okta.deviceAssurance.read" in result["error"]
+        mock_get_client.assert_not_called()
+
 
 # ===========================================================================
 # get_device_assurance_policy
@@ -447,12 +581,17 @@ class TestGetDeviceAssurancePolicy:
         assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_invalid_id_returns_error_without_api_call(self, ctx_no_elicitation):
+    @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
+    async def test_forbidden_exception_returns_scope_error(self, mock_get_client, ctx_no_elicitation):
+        mock_get_client.side_effect = _make_forbidden_exception(403)
+
         result = await get_device_assurance_policy(
-            ctx=ctx_no_elicitation, device_assurance_id="../evil/path"
+            ctx=ctx_no_elicitation, device_assurance_id=DEVICE_ASSURANCE_ID
         )
 
         assert "error" in result
+        assert "403" in result["error"]
+        assert "okta.deviceAssurance.read" in result["error"]
 
 
 # ===========================================================================
@@ -535,6 +674,20 @@ class TestCreateDeviceAssurancePolicy:
         )
 
         assert "error" in result
+
+    @pytest.mark.asyncio
+    @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
+    async def test_forbidden_exception_returns_scope_error(self, mock_get_client, ctx_no_elicitation):
+        mock_get_client.side_effect = _make_forbidden_exception(403)
+
+        result = await create_device_assurance_policy(
+            ctx=ctx_no_elicitation,
+            policy_data={"name": "Test", "platform": "MACOS"},
+        )
+
+        assert "error" in result
+        assert "403" in result["error"]
+        assert "okta.deviceAssurance.manage" in result["error"]
 
     @pytest.mark.asyncio
     @patch("okta_mcp_server.tools.device_assurance.device_assurance.DeviceAssurance")
@@ -694,3 +847,18 @@ class TestReplaceDeviceAssurancePolicy:
         )
 
         assert "error" in result
+
+    @pytest.mark.asyncio
+    @patch("okta_mcp_server.tools.device_assurance.device_assurance.get_okta_client")
+    async def test_forbidden_exception_returns_scope_error(self, mock_get_client, ctx_no_elicitation):
+        mock_get_client.side_effect = _make_forbidden_exception(403)
+
+        result = await replace_device_assurance_policy(
+            ctx=ctx_no_elicitation,
+            device_assurance_id=DEVICE_ASSURANCE_ID,
+            policy_data={"name": "Test", "platform": "MACOS"},
+        )
+
+        assert "error" in result
+        assert "403" in result["error"]
+        assert "okta.deviceAssurance.manage" in result["error"]
