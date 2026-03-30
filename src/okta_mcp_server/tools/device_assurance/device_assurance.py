@@ -5,6 +5,7 @@
 # Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and limitations under the License.
 
+import datetime
 import re
 from typing import Any, Dict, List, Optional
 
@@ -258,7 +259,10 @@ async def list_device_assurance_policies(ctx: Context) -> Dict[str, Any]:
     IMPORTANT — always call fresh: Never reuse results from a previous call
     to resolve a policy name to an ID. Always call this tool again to get
     an up-to-date list, as policies may have been created or deleted since
-    the last call.
+    the last call. The response includes a ``retrieved_at`` timestamp — if
+    the user references a policy by name that does not appear in a previous
+    list, you MUST call this tool again before concluding that the policy
+    does not exist.
 
     IMPORTANT — intermittent empty response: If this tool returns an empty
     list but the user expects policies to exist, call it again — the API
@@ -268,6 +272,10 @@ async def list_device_assurance_policies(ctx: Context) -> Dict[str, Any]:
     Returns:
         Dict containing:
             - policies (List[Dict]): List of device assurance policy objects.
+            - retrieved_at (str): ISO-8601 UTC timestamp of when this list
+              was fetched. Use this to detect stale data.
+            - note (str): Reminder that the list may become stale and must
+              be re-fetched before resolving a policy name to an ID.
             - warning (str): Present if the API returned an unexpected empty
               response; the caller should retry.
             - error (str): Error message if the operation fails.
@@ -315,9 +323,15 @@ async def list_device_assurance_policies(ctx: Context) -> Dict[str, Any]:
             )
             return {
                 "policies": [],
+                "retrieved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "warning": (
                     "The API returned an unexpected empty response. "
                     "If you expect policies to exist, please call this tool again."
+                ),
+                "note": (
+                    "This list was retrieved at the time shown in retrieved_at. "
+                    "Always call list_device_assurance_policies again before resolving "
+                    "a policy name to an ID — the list may have changed since it was last fetched."
                 ),
             }
 
@@ -325,14 +339,28 @@ async def list_device_assurance_policies(ctx: Context) -> Dict[str, Any]:
 
         if not policy_list:
             logger.info("No device assurance policies found")
-            return {"policies": []}
+            return {
+                "policies": [],
+                "retrieved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "note": (
+                    "This list was retrieved at the time shown in retrieved_at. "
+                    "Always call list_device_assurance_policies again before resolving "
+                    "a policy name to an ID — the list may have changed since it was last fetched."
+                ),
+            }
 
         logger.info(f"Successfully retrieved {len(policy_list)} device assurance policy(ies)")
         return {
             "policies": [
                 _enrich_policy_with_attribute_status(policy.to_dict())
                 for policy in policy_list
-            ]
+            ],
+            "retrieved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "note": (
+                "This list was retrieved at the time shown in retrieved_at. "
+                "Always call list_device_assurance_policies again before resolving "
+                "a policy name to an ID — the list may have changed since it was last fetched."
+            ),
         }
 
     except (ForbiddenException, UnauthorizedException) as e:
@@ -358,8 +386,12 @@ async def get_device_assurance_policy(
     IMPORTANT — name-to-ID resolution: This tool requires a policy ID, not a
     name. If the user refers to a policy by name, you MUST call
     list_device_assurance_policies() first to get a FRESH, current list before
-    resolving the name to an ID. Never use a policy ID obtained from a previous
-    list call — new policies may have been created in the UI since then.
+    resolving the name to an ID. NEVER resolve a policy name using results
+    already present in the conversation — those results may be stale. Even if
+    you called list_device_assurance_policies moments ago, call it again: a
+    policy may have been created in the Okta UI between that call and now.
+    Only after receiving the fresh list may you map the name to an ID and call
+    this tool.
 
     Parameters:
         device_assurance_id (str, required): The ID of the device assurance policy.
