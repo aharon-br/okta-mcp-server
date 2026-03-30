@@ -214,7 +214,33 @@ async def create_email_domain(
             logger.error(f"Okta API error while creating email domain {domain!r}: {err}")
             return {"error": str(err)}
 
+        # The Okta Python SDK may return None for `created` even on a successful
+        # 201 response due to a known response-parsing bug.  Fall back to a
+        # list-and-filter lookup so we always return a meaningful result.
+        if created is None:
+            logger.warning(
+                f"SDK returned None for newly-created domain {domain!r}; "
+                "falling back to list lookup."
+            )
+            domain_list, _, list_err = await client.list_email_domains()
+            if not list_err and domain_list:
+                for d in domain_list:
+                    if getattr(d, "domain", None) == domain:
+                        created = d
+                        break
+
         result = _serialize(created)
+        if result is None:
+            logger.error(
+                f"Could not retrieve created email domain {domain!r} after creation."
+            )
+            return {
+                "error": (
+                    f"Email domain {domain!r} was created but the response could not be "
+                    "retrieved. Use list_email_domains or get_email_domain to confirm."
+                )
+            }
+
         logger.info(
             f"Successfully created email domain {domain!r} with id: {result.get('id')}"
         )
@@ -483,11 +509,31 @@ async def verify_email_domain(
 
         result, _, err = await client.verify_email_domain(email_domain_id)
 
-        if err:
-            logger.error(
-                f"Okta API error while verifying email domain {email_domain_id!r}: {err}"
+        # The verify endpoint may return 204 No Content (or the SDK may fail to
+        # parse the response body), both of which surface as `result is None` or
+        # a spurious error.  In either case the verify call did take effect on the
+        # Okta side, so fall back to get_email_domain for the authoritative state.
+        if result is None or err:
+            if err:
+                logger.warning(
+                    f"SDK reported an error for verify on {email_domain_id!r}: {err}. "
+                    "Attempting get_email_domain fallback."
+                )
+            current, _, fetch_err = await client.get_email_domain(email_domain_id)
+            if fetch_err or current is None:
+                # Both the verify call and the fallback GET failed — surface the
+                # original error so the caller knows something went wrong.
+                logger.error(
+                    f"Okta API error while verifying email domain {email_domain_id!r}: {err}"
+                )
+                return {"error": str(err)}
+            serialized = _serialize(current)
+            status = serialized.get("validationStatus", "unknown") if serialized else "unknown"
+            logger.info(
+                f"Email domain {email_domain_id!r} verify triggered; "
+                f"current validationStatus={status!r} (via fallback GET)"
             )
-            return {"error": str(err)}
+            return serialized or {}
 
         serialized = _serialize(result)
         status = serialized.get("validationStatus", "unknown") if serialized else "unknown"
