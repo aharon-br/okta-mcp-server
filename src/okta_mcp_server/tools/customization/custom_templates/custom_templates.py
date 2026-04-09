@@ -79,13 +79,26 @@ from okta_mcp_server.utils.validation import validate_ids
 # ---------------------------------------------------------------------------
 
 def _serialize(obj) -> Any:
-    """Recursively serialise Pydantic models and lists to plain Python types."""
+    """Recursively serialise SDK v3 models and lists to plain Python types.
+
+    We explicitly use ``model_dump`` (Pydantic v2) rather than ``to_dict``.
+    The SDK-generated ``to_dict`` on preview models (e.g. ``EmailPreview``)
+    marks ``body`` and ``subject`` as server-readOnly and omits them from the
+    output, so calling it would silently return ``{}`` or just ``_links``.
+    ``model_dump`` does not apply that exclusion and is therefore the correct
+    serialisation path for response objects.
+    """
     if obj is None:
         return None
-    if hasattr(obj, "model_dump"):
-        return obj.model_dump(by_alias=True, exclude_none=True)
     if isinstance(obj, list):
         return [_serialize(item) for item in obj]
+    if hasattr(obj, "model_dump"):
+        try:
+            return obj.model_dump(by_alias=True, exclude_none=True)
+        except Exception:
+            logger.debug(f"model_dump failed for {type(obj).__name__}, falling back to __dict__")
+    if hasattr(obj, "__dict__"):
+        return {k: v for k, v in vars(obj).items() if not k.startswith("_") and v is not None}
     return obj
 
 
