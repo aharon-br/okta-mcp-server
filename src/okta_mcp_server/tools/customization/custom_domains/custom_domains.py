@@ -39,7 +39,7 @@ from okta_mcp_server.server import mcp
 from okta_mcp_server.utils.client import get_okta_client
 from okta_mcp_server.utils.elicitation import DeleteConfirmation, elicit_or_fallback
 from okta_mcp_server.utils.messages import DELETE_CUSTOM_DOMAIN
-from okta_mcp_server.utils.validation import validate_ids
+from okta_mcp_server.utils.validation import InvalidFilePathError, validate_file_path, validate_ids
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +383,8 @@ async def upsert_custom_domain_certificate(
             leaf certificate, or may be identical to ``certificate`` for
             self-signed/root-signed certs.
         private_key_file_path (str, required): Absolute path to the PEM-encoded
-            RSA private key file on the server (e.g. ``"/etc/ssl/private/domain.key"``).
+            RSA private key file on the server (e.g. ``"/home/user/certs/domain.key"
+            or ``"/tmp/domain.key"``).
             The key is read from disk and never exposed in the conversation.
             The file must contain a key starting with
             ``-----BEGIN PRIVATE KEY-----`` or ``-----BEGIN RSA PRIVATE KEY-----``.
@@ -394,6 +395,13 @@ async def upsert_custom_domain_certificate(
     """
     logger.info(f"Upserting certificate for custom domain: {domain_id}")
     manager = ctx.request_context.lifespan_context.okta_auth_manager
+
+    # Validate the file path before any filesystem access.
+    try:
+        validate_file_path(private_key_file_path, "private_key_file_path")
+    except InvalidFilePathError as e:
+        logger.error(f"Rejected unsafe private_key_file_path: {e}")
+        return {"error": str(e)}
 
     # Read the private key from a local file path so the raw PEM key
     # value is never passed through the LLM conversation.

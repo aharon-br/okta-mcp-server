@@ -56,7 +56,7 @@ from okta_mcp_server.utils.messages import (
     DELETE_THEME_FAVICON,
     DELETE_THEME_LOGO,
 )
-from okta_mcp_server.utils.validation import validate_ids
+from okta_mcp_server.utils.validation import InvalidFilePathError, validate_file_path, validate_ids
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +311,12 @@ async def upload_brand_theme_logo(
     """
     logger.info(f"Uploading logo for theme {theme_id}, brand {brand_id}: {file_path}")
 
+    try:
+        validate_file_path(file_path, "file_path")
+    except InvalidFilePathError as e:
+        logger.error(f"Rejected unsafe file_path for logo upload: {e}")
+        return {"error": str(e)}
+
     if not os.path.isfile(file_path):
         return {"error": f"File not found: {file_path}"}
 
@@ -422,6 +428,12 @@ async def upload_brand_theme_favicon(
         - error (str): Present only when the operation fails.
     """
     logger.info(f"Uploading favicon for theme {theme_id}, brand {brand_id}: {file_path}")
+
+    try:
+        validate_file_path(file_path, "file_path")
+    except InvalidFilePathError as e:
+        logger.error(f"Rejected unsafe file_path for favicon upload: {e}")
+        return {"error": str(e)}
 
     if not os.path.isfile(file_path):
         return {"error": f"File not found: {file_path}"}
@@ -536,6 +548,12 @@ async def upload_brand_theme_background_image(
         - error (str): Present only when the operation fails.
     """
     logger.info(f"Uploading background image for theme {theme_id}, brand {brand_id}: {file_path}")
+
+    try:
+        validate_file_path(file_path, "file_path")
+    except InvalidFilePathError as e:
+        logger.error(f"Rejected unsafe file_path for background image upload: {e}")
+        return {"error": str(e)}
 
     if not os.path.isfile(file_path):
         return {"error": f"File not found: {file_path}"}

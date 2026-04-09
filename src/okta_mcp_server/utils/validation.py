@@ -15,6 +15,7 @@ URL paths when passed to the Okta SDK client.
 
 import functools
 import inspect
+import os
 import re
 from typing import Any, Callable
 
@@ -111,6 +112,98 @@ def validate_okta_id(id_value: str, id_type: str = "ID") -> str:
         )
 
     return id_value
+
+
+class InvalidFilePathError(ValueError):
+    """Exception raised when a file path is invalid or potentially unsafe."""
+
+    pass
+
+
+# Path traversal sequences to reject in file paths (URL-NEG-003)
+FILE_PATH_TRAVERSAL_PATTERNS = [
+    "..",
+    "%2e%2e",  # URL-encoded ..
+    "%2E%2E",  # URL-encoded .. (uppercase)
+]
+
+# Absolute OS directory prefixes the server must never read from (URL-NEG-004).
+# Prevents MCP tools from exfiltrating host credentials or sensitive system
+# files when a caller supplies a crafted path.
+FORBIDDEN_SYSTEM_PATH_PREFIXES = (
+    "/etc",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/boot",
+    "/root",
+    "/var/log",
+    "/var/run",
+    "/run",
+    "/usr/bin",
+    "/usr/sbin",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/private/etc",   # macOS resolves /etc → /private/etc
+    "/private/var",   # macOS resolves /var  → /private/var
+)
+
+
+def validate_file_path(file_path: str, param_name: str = "file_path") -> str:
+    """
+    Validate that a file path is safe to open.
+
+    Rejects path traversal sequences and absolute paths that target OS system
+    directories, preventing the server from reading sensitive host files.
+
+    Args:
+        file_path: The path to validate.
+        param_name: Descriptive name used in error messages.
+
+    Returns:
+        The validated path (unchanged if valid).
+
+    Raises:
+        InvalidFilePathError: If the path contains traversal sequences         [URL-NEG-003]
+            or targets a forbidden system location                              [URL-NEG-004].
+    """
+    if not file_path:
+        raise InvalidFilePathError(f"{param_name} cannot be empty")
+
+    if not isinstance(file_path, str):
+        raise InvalidFilePathError(f"{param_name} must be a string")
+
+    # URL-NEG-003: reject traversal sequences before any normalization so that
+    # patterns like "images/../../etc/passwd" are caught at the lexical level.
+    path_lower = file_path.lower()
+    for pattern in FILE_PATH_TRAVERSAL_PATTERNS:
+        if pattern in path_lower:
+            logger.warning(
+                f"Rejected {param_name} containing path traversal pattern '{pattern}': "
+                f"{_sanitize_for_log(file_path)}"
+            )
+            raise InvalidFilePathError(
+                f"Invalid {param_name}: path traversal sequences are not allowed."
+            )
+
+    # URL-NEG-004: reject absolute paths into OS system directories.
+    # os.path.normpath collapses redundant separators (e.g. /etc//passwd →
+    # /etc/passwd) without resolving symlinks, keeping the check lexical.
+    normalized = os.path.normpath(file_path)
+    for prefix in FORBIDDEN_SYSTEM_PATH_PREFIXES:
+        if normalized == prefix or normalized.startswith(prefix + os.sep):
+            logger.warning(
+                f"Rejected {param_name} targeting system path '{prefix}': "
+                f"{_sanitize_for_log(file_path)}"
+            )
+            raise InvalidFilePathError(
+                f"Invalid {param_name}: access to system paths is not allowed. "
+                f"Provide a path to a user-owned file (e.g. under /tmp or your home directory)."
+            )
+
+    return file_path
 
 
 def validate_ids(*id_params: str, error_return_type: str = "list"):
