@@ -382,9 +382,11 @@ async def upsert_custom_domain_certificate(
             May include intermediate CA certificates concatenated after the
             leaf certificate, or may be identical to ``certificate`` for
             self-signed/root-signed certs.
-        private_key_file_path (str, required): Absolute path to the PEM-encoded
-            RSA private key file on the server (e.g. ``"/home/user/certs/domain.key"
-            or ``"/tmp/domain.key"``).
+        private_key_file_path (str, required): Path to the PEM-encoded RSA
+            private key file.  The file must reside inside a permitted directory
+            (default: ``/tmp`` or ``/var/tmp``; extend via the
+            ``OKTA_MCP_ALLOWED_KEY_DIRS`` environment variable).
+            Example: ``"/tmp/domain.key"``.
             The key is read from disk and never exposed in the conversation.
             The file must contain a key starting with
             ``-----BEGIN PRIVATE KEY-----`` or ``-----BEGIN RSA PRIVATE KEY-----``.

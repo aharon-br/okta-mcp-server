@@ -120,43 +120,61 @@ class InvalidFilePathError(ValueError):
     pass
 
 
-# Path traversal sequences to reject in file paths (URL-NEG-003)
+# Path traversal sequences to reject in file paths
 FILE_PATH_TRAVERSAL_PATTERNS = [
     "..",
     "%2e%2e",  # URL-encoded ..
     "%2E%2E",  # URL-encoded .. (uppercase)
 ]
 
-# Absolute OS directory prefixes the server must never read from (URL-NEG-004).
-# Prevents MCP tools from exfiltrating host credentials or sensitive system
-# files when a caller supplies a crafted path.
-FORBIDDEN_SYSTEM_PATH_PREFIXES = (
-    "/etc",
-    "/proc",
-    "/sys",
-    "/dev",
-    "/boot",
-    "/root",
-    "/var/log",
-    "/var/run",
-    "/run",
-    "/usr/bin",
-    "/usr/sbin",
-    "/bin",
-    "/sbin",
-    "/lib",
-    "/lib64",
-    "/private/etc",   # macOS resolves /etc → /private/etc
-    "/private/var",   # macOS resolves /var  → /private/var
-)
+# ---------------------------------------------------------------------------
+# Allow-list for file paths
+# ---------------------------------------------------------------------------
+# Environment variable operators set to expand the safe-directory list.
+# Value must be a colon-separated list of absolute directory paths (Unix) or
+# semicolon-separated (Windows).  Example:
+#   export OKTA_MCP_ALLOWED_KEY_DIRS="/tmp:/opt/certs"
+ALLOWED_KEY_DIRS_ENV = "OKTA_MCP_ALLOWED_KEY_DIRS"
+
+# Built-in defaults: only /tmp and /var/tmp are permitted unless the operator
+# explicitly extends the list via the environment variable.
+_DEFAULT_ALLOWED_KEY_DIRS: tuple = ("/tmp", "/var/tmp")
+
+
+def _get_allowed_key_dirs() -> tuple:
+    """
+    Return the set of real (symlink-resolved) absolute directory prefixes
+    inside which file reads are permitted.
+
+    Priority:
+      1. OKTA_MCP_ALLOWED_KEY_DIRS environment variable (if set and non-empty).
+      2. Built-in defaults: /tmp and /var/tmp.
+    """
+    env_val = os.environ.get(ALLOWED_KEY_DIRS_ENV, "").strip()
+    if env_val:
+        sep = ";" if os.name == "nt" else ":"
+        dirs = [d.strip() for d in env_val.split(sep) if d.strip()]
+    else:
+        dirs = list(_DEFAULT_ALLOWED_KEY_DIRS)
+    return tuple(os.path.realpath(d) for d in dirs)
 
 
 def validate_file_path(file_path: str, param_name: str = "file_path") -> str:
     """
     Validate that a file path is safe to open.
 
-    Rejects path traversal sequences and absolute paths that target OS system
-    directories, preventing the server from reading sensitive host files.
+    Uses an allow-list approach: the path (after full symlink resolution) must
+    fall inside one of the permitted directories.  By default only ``/tmp`` and
+    ``/var/tmp`` are permitted; operators extend this via the
+    ``OKTA_MCP_ALLOWED_KEY_DIRS`` environment variable.
+
+    Steps performed:
+      1. Basic type/emptiness checks.
+      2. Reject path traversal sequences lexically.
+      3. Resolve the path to its real absolute location via ``os.path.realpath``
+         (follows symlinks, resolves relative paths against CWD).  This prevents
+         both symlink-escape and CWD-relative attacks.
+      4. Require the resolved path to be inside the allow-list.
 
     Args:
         file_path: The path to validate.
@@ -166,8 +184,8 @@ def validate_file_path(file_path: str, param_name: str = "file_path") -> str:
         The validated path (unchanged if valid).
 
     Raises:
-        InvalidFilePathError: If the path contains traversal sequences         [URL-NEG-003]
-            or targets a forbidden system location                              [URL-NEG-004].
+        InvalidFilePathError: If the path contains traversal sequences
+            or resolves outside the permitted directory allow-list.
     """
     if not file_path:
         raise InvalidFilePathError(f"{param_name} cannot be empty")
@@ -175,8 +193,8 @@ def validate_file_path(file_path: str, param_name: str = "file_path") -> str:
     if not isinstance(file_path, str):
         raise InvalidFilePathError(f"{param_name} must be a string")
 
-    # URL-NEG-003: reject traversal sequences before any normalization so that
-    # patterns like "images/../../etc/passwd" are caught at the lexical level.
+    # reject traversal sequences at the lexical level before any
+    # normalization, so that patterns like "images/../../etc/passwd" are caught.
     path_lower = file_path.lower()
     for pattern in FILE_PATH_TRAVERSAL_PATTERNS:
         if pattern in path_lower:
@@ -188,20 +206,27 @@ def validate_file_path(file_path: str, param_name: str = "file_path") -> str:
                 f"Invalid {param_name}: path traversal sequences are not allowed."
             )
 
-    # URL-NEG-004: reject absolute paths into OS system directories.
-    # os.path.normpath collapses redundant separators (e.g. /etc//passwd →
-    # /etc/passwd) without resolving symlinks, keeping the check lexical.
-    normalized = os.path.normpath(file_path)
-    for prefix in FORBIDDEN_SYSTEM_PATH_PREFIXES:
-        if normalized == prefix or normalized.startswith(prefix + os.sep):
-            logger.warning(
-                f"Rejected {param_name} targeting system path '{prefix}': "
-                f"{_sanitize_for_log(file_path)}"
-            )
-            raise InvalidFilePathError(
-                f"Invalid {param_name}: access to system paths is not allowed. "
-                f"Provide a path to a user-owned file (e.g. under /tmp or your home directory)."
-            )
+    # resolve the full real path (resolves symlinks AND relative
+    # paths against CWD) then enforce the allow-list.
+    # realpath is used instead of normpath to prevent symlink-escape attacks
+    # where /tmp/evil.key → /etc/passwd would pass a lexical deny-list check.
+    real_path = os.path.realpath(os.path.abspath(file_path))
+    allowed_dirs = _get_allowed_key_dirs()
+    if not any(
+        real_path == allowed_dir or real_path.startswith(allowed_dir + os.sep)
+        for allowed_dir in allowed_dirs
+    ):
+        allowed_display = os.pathsep.join(allowed_dirs) if allowed_dirs else "(none configured)"
+        logger.warning(
+            f"Rejected {param_name}: resolved path {_sanitize_for_log(real_path)!r} "
+            f"is outside permitted directories ({allowed_display})"
+        )
+        raise InvalidFilePathError(
+            f"Invalid {param_name}: the path resolves to {real_path!r}, which is "
+            f"outside the permitted directories ({allowed_display}). "
+            f"Place the file inside a permitted directory or configure allowed "
+            f"directories via the {ALLOWED_KEY_DIRS_ENV} environment variable."
+        )
 
     return file_path
 

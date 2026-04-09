@@ -10,9 +10,11 @@ Unit tests for the validation module.
 
 These tests verify that the validate_okta_id function properly blocks
 path traversal and injection attacks while allowing valid Okta IDs,
-and that validate_file_path blocks access to OS system paths (URL-NEG-004)
-and path traversal sequences (URL-NEG-003).
+and that validate_file_path blocks access to OS system paths
+and path traversal sequences.
 """
+
+import os
 
 import pytest
 
@@ -169,101 +171,101 @@ class TestValidateOktaId:
 
 
 class TestValidateFilePath:
-    """Tests for the validate_file_path function (URL-NEG-003 and URL-NEG-004)."""
+    """Tests for the validate_file_path function."""
 
     # ------------------------------------------------------------------
-    # URL-NEG-004: Absolute system path rejection
+    # Absolute system path rejection
     # ------------------------------------------------------------------
 
     def test_rejects_etc_passwd(self):
-        """URL-NEG-004: /etc/passwd must be rejected."""
+        """: /etc/passwd must be rejected."""
         with pytest.raises(InvalidFilePathError) as exc_info:
             validate_file_path("/etc/passwd", "file_path")
-        assert "system paths" in str(exc_info.value).lower()
+        assert "permitted" in str(exc_info.value).lower()
 
     def test_rejects_etc_hosts(self):
-        """URL-NEG-004: /etc/hosts must be rejected."""
+        """: /etc/hosts must be rejected."""
         with pytest.raises(InvalidFilePathError) as exc_info:
             validate_file_path("/etc/hosts", "file_path")
-        assert "system paths" in str(exc_info.value).lower()
+        assert "permitted" in str(exc_info.value).lower()
 
     def test_rejects_etc_subdirectory(self):
-        """URL-NEG-004: Any path under /etc/ must be rejected."""
+        """: Any path under /etc/ must be rejected."""
         with pytest.raises(InvalidFilePathError):
             validate_file_path("/etc/ssl/private/domain.key", "file_path")
 
     def test_rejects_proc_self_environ(self):
-        """URL-NEG-004: /proc/self/environ (credential leak vector) must be rejected."""
+        """: /proc/self/environ (credential leak vector) must be rejected."""
         with pytest.raises(InvalidFilePathError) as exc_info:
             validate_file_path("/proc/self/environ", "file_path")
-        assert "system paths" in str(exc_info.value).lower()
+        assert "permitted" in str(exc_info.value).lower()
 
     def test_rejects_sys_path(self):
-        """URL-NEG-004: /sys paths must be rejected."""
+        """: /sys paths must be rejected."""
         with pytest.raises(InvalidFilePathError):
             validate_file_path("/sys/kernel/debug", "file_path")
 
     def test_rejects_dev_path(self):
-        """URL-NEG-004: /dev paths must be rejected."""
+        """: /dev paths must be rejected."""
         with pytest.raises(InvalidFilePathError):
             validate_file_path("/dev/sda", "file_path")
 
     def test_rejects_root_home(self):
-        """URL-NEG-004: /root home directory must be rejected."""
+        """: /root home directory must be rejected."""
         with pytest.raises(InvalidFilePathError):
             validate_file_path("/root/.ssh/id_rsa", "file_path")
 
     def test_rejects_var_log(self):
-        """URL-NEG-004: /var/log paths must be rejected."""
+        """: /var/log paths must be rejected."""
         with pytest.raises(InvalidFilePathError):
             validate_file_path("/var/log/auth.log", "file_path")
 
     def test_rejects_macos_private_etc(self):
-        """URL-NEG-004: macOS /private/etc (real target of /etc symlink) must be rejected."""
+        """: macOS /private/etc (real target of /etc symlink) must be rejected."""
         with pytest.raises(InvalidFilePathError) as exc_info:
             validate_file_path("/private/etc/passwd", "file_path")
-        assert "system paths" in str(exc_info.value).lower()
+        assert "permitted" in str(exc_info.value).lower()
 
     def test_rejects_macos_private_var(self):
-        """URL-NEG-004: macOS /private/var must be rejected."""
+        """: macOS /private/var must be rejected."""
         with pytest.raises(InvalidFilePathError):
             validate_file_path("/private/var/log/system.log", "file_path")
 
     def test_rejects_redundant_separators_to_etc(self):
-        """URL-NEG-004: normpath should collapse //etc//passwd to /etc/passwd and reject it."""
+        """: normpath should collapse //etc//passwd to /etc/passwd and reject it."""
         with pytest.raises(InvalidFilePathError):
             validate_file_path("/etc//passwd", "file_path")
 
     def test_param_name_appears_in_error(self):
-        """URL-NEG-004: The param_name must appear in the error message."""
+        """: The param_name must appear in the error message."""
         with pytest.raises(InvalidFilePathError) as exc_info:
             validate_file_path("/etc/passwd", "private_key_file_path")
         assert "private_key_file_path" in str(exc_info.value)
 
     # ------------------------------------------------------------------
-    # URL-NEG-003: Path traversal rejection
+    # Path traversal rejection
     # ------------------------------------------------------------------
 
     def test_rejects_dot_dot_traversal(self):
-        """URL-NEG-003: Path traversal with .. must be rejected."""
+        """: Path traversal with .. must be rejected."""
         with pytest.raises(InvalidFilePathError) as exc_info:
             validate_file_path("images/../../../etc/passwd", "file_path")
         assert "traversal" in str(exc_info.value).lower()
 
     def test_rejects_url_encoded_traversal_lowercase(self):
-        """URL-NEG-003: URL-encoded %2e%2e traversal must be rejected."""
+        """: URL-encoded %2e%2e traversal must be rejected."""
         with pytest.raises(InvalidFilePathError) as exc_info:
             validate_file_path("%2e%2e%2fetc%2fpasswd", "file_path")
         assert "traversal" in str(exc_info.value).lower()
 
     def test_rejects_url_encoded_traversal_uppercase(self):
-        """URL-NEG-003: URL-encoded %2E%2E traversal must be rejected."""
+        """: URL-encoded %2E%2E traversal must be rejected."""
         with pytest.raises(InvalidFilePathError) as exc_info:
             validate_file_path("%2E%2E/etc/passwd", "file_path")
         assert "traversal" in str(exc_info.value).lower()
 
     def test_rejects_traversal_in_middle_of_path(self):
-        """URL-NEG-003: Traversal embedded in a path must be rejected."""
+        """: Traversal embedded in a path must be rejected."""
         with pytest.raises(InvalidFilePathError):
             validate_file_path("/tmp/uploads/../../../etc/shadow", "file_path")
 
@@ -276,20 +278,38 @@ class TestValidateFilePath:
         result = validate_file_path("/tmp/logo.png", "file_path")
         assert result == "/tmp/logo.png"
 
-    def test_allows_home_directory_path(self):
-        """User home directory paths must be accepted."""
-        result = validate_file_path("/Users/aniket/certs/domain.key", "file_path")
-        assert result == "/Users/aniket/certs/domain.key"
+    def test_rejects_home_directory_path(self):
+        """: Home directory paths outside the allow-list must be rejected.
 
-    def test_allows_relative_path(self):
-        """Relative paths must be accepted."""
-        result = validate_file_path("assets/logo.png", "file_path")
-        assert result == "assets/logo.png"
+        With the allow-list fix, arbitrary absolute paths (even user-owned ones
+        like ~/.aws/credentials or ~/certs/domain.key) are blocked unless the
+        operator explicitly adds the directory to OKTA_MCP_ALLOWED_KEY_DIRS.
+        """
+        with pytest.raises(InvalidFilePathError) as exc_info:
+            validate_file_path("/Users/aniket/certs/domain.key", "file_path")
+        assert "permitted" in str(exc_info.value).lower()
 
-    def test_allows_current_dir_relative_path(self):
-        """Single-component relative paths must be accepted."""
+    def test_allows_relative_path_inside_tmp(self, monkeypatch):
+        """A relative path whose CWD-resolved real path falls inside /tmp must pass."""
+        # Use /tmp directly — on macOS this resolves to /private/tmp which is
+        # in the default allow-list.  tempfile.gettempdir() returns the
+        # per-user temp folder (/var/folders/...) which is NOT /tmp.
+        monkeypatch.chdir("/tmp")
         result = validate_file_path("logo.png", "file_path")
         assert result == "logo.png"
+
+    def test_rejects_relative_path_outside_allowed(self, monkeypatch, tmp_path):
+        """A relative path that resolves outside the allow-list must be rejected."""
+        monkeypatch.chdir(tmp_path)  # tmp_path is under /private/var/... on macOS
+        # Only rejected when the resolved path is not under /tmp or /var/tmp.
+        import tempfile
+        real_tmp = os.path.realpath(tempfile.gettempdir())
+        real_resolved = os.path.realpath(os.path.abspath("secrets.env"))
+        if real_resolved.startswith(real_tmp + os.sep) or real_resolved == real_tmp:
+            pytest.skip("CWD resolves inside /tmp — skipping outside-allowed test")
+        with pytest.raises(InvalidFilePathError) as exc_info:
+            validate_file_path("secrets.env", "file_path")
+        assert "permitted" in str(exc_info.value).lower()
 
     def test_returns_path_unchanged(self):
         """validate_file_path must return the original path value when valid."""
