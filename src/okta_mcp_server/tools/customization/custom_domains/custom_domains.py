@@ -25,6 +25,7 @@ Certificate source types : MANUAL | OKTA_MANAGED
 Certificate types        : PEM
 """
 
+import os
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -407,7 +408,6 @@ async def upsert_custom_domain_certificate(
 
     # Read the private key from a local file path so the raw PEM key
     # value is never passed through the LLM conversation.
-    import os
     if not os.path.isfile(private_key_file_path):
         return {"error": f"Private key file not found: {private_key_file_path!r}"}
     try:

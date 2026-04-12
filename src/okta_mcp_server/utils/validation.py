@@ -141,10 +141,36 @@ ALLOWED_KEY_DIRS_ENV = "OKTA_MCP_ALLOWED_KEY_DIRS"
 _DEFAULT_ALLOWED_KEY_DIRS: tuple = ("/tmp", "/var/tmp")
 
 
+def _get_raw_allowed_key_dirs() -> tuple:
+    """
+    Return normalized (non-symlink-resolved) allowed directory prefixes.
+
+    Uses ``os.path.normpath`` + ``os.path.abspath`` — **no** ``realpath`` call —
+    so that no filesystem access occurs on the allowed-dir values themselves
+    beyond reading the current process's working directory.  This is the set
+    used in the first (filesystem-free) validation phase.
+
+    Priority:
+      1. OKTA_MCP_ALLOWED_KEY_DIRS environment variable (if set and non-empty).
+      2. Built-in defaults: /tmp and /var/tmp.
+    """
+    env_val = os.environ.get(ALLOWED_KEY_DIRS_ENV, "").strip()
+    if env_val:
+        sep = ";" if os.name == "nt" else ":"
+        dirs = [d.strip() for d in env_val.split(sep) if d.strip()]
+    else:
+        dirs = list(_DEFAULT_ALLOWED_KEY_DIRS)
+    return tuple(os.path.normpath(os.path.abspath(d)) for d in dirs)
+
+
 def _get_allowed_key_dirs() -> tuple:
     """
     Return the set of real (symlink-resolved) absolute directory prefixes
     inside which file reads are permitted.
+
+    Uses ``os.path.realpath`` to follow symlinks on the *trusted* allowed-dir
+    values (e.g. /tmp → /private/tmp on macOS).  This is the set used in the
+    second (symlink-escape) validation phase.
 
     Priority:
       1. OKTA_MCP_ALLOWED_KEY_DIRS environment variable (if set and non-empty).
@@ -163,18 +189,36 @@ def validate_file_path(file_path: str, param_name: str = "file_path") -> str:
     """
     Validate that a file path is safe to open.
 
-    Uses an allow-list approach: the path (after full symlink resolution) must
-    fall inside one of the permitted directories.  By default only ``/tmp`` and
-    ``/var/tmp`` are permitted; operators extend this via the
-    ``OKTA_MCP_ALLOWED_KEY_DIRS`` environment variable.
+    Uses a **two-phase** allow-list approach so that the filesystem is never
+    accessed on an untrusted path before that path has been validated:
+
+    Phase 1 — filesystem-free string check (fail-fast, no I/O on user path):
+      Normalise the path using only ``os.path.normpath`` + ``os.path.abspath``
+      (pure string operations; no symlink resolution) and verify it falls
+      inside the raw (non-realpath) allowed directories.  This rejects obvious
+      out-of-bounds absolute paths (e.g. ``/etc/passwd``) **immediately**,
+      without performing any filesystem operation on the user-supplied value.
+
+    Phase 2 — symlink-escape check (filesystem I/O, allowed-range paths only):
+      Resolve the path to its real on-disk location via ``os.path.realpath``
+      (follows symlinks) and verify the result is still inside the
+      realpath-resolved allowed directories.  Because this step is only reached
+      when Phase 1 has already confirmed the path is lexically within the
+      allow-list, filesystem access is scoped to paths that are already in the
+      vicinity of permitted directories.
+
+    By default only ``/tmp`` and ``/var/tmp`` are permitted; operators extend
+    this via the ``OKTA_MCP_ALLOWED_KEY_DIRS`` environment variable.
 
     Steps performed:
-      1. Basic type/emptiness checks.
-      2. Reject path traversal sequences lexically.
-      3. Resolve the path to its real absolute location via ``os.path.realpath``
-         (follows symlinks, resolves relative paths against CWD).  This prevents
-         both symlink-escape and CWD-relative attacks.
-      4. Require the resolved path to be inside the allow-list.
+      1. Basic type / emptiness checks.
+      2. Reject path traversal sequences lexically (``..``, URL-encoded forms).
+      3. **Phase 1**: normalize with ``normpath``+``abspath``; reject if outside
+         the raw allowed-dir list (no filesystem access on user path).
+      4. **Phase 2**: resolve with ``realpath``; reject if outside the
+         realpath-resolved allowed-dir list (catches symlink escapes).
+         The resolved path is **not** included in the error message to prevent
+         information disclosure.
 
     Args:
         file_path: The path to validate.
@@ -193,8 +237,10 @@ def validate_file_path(file_path: str, param_name: str = "file_path") -> str:
     if not isinstance(file_path, str):
         raise InvalidFilePathError(f"{param_name} must be a string")
 
-    # reject traversal sequences at the lexical level before any
-    # normalization, so that patterns like "images/../../etc/passwd" are caught.
+    # ------------------------------------------------------------------ #
+    # Step 1: Reject traversal sequences at the lexical level (no I/O).   #
+    # Catches patterns like "images/../../etc/passwd" before normalization. #
+    # ------------------------------------------------------------------ #
     path_lower = file_path.lower()
     for pattern in FILE_PATH_TRAVERSAL_PATTERNS:
         if pattern in path_lower:
@@ -206,24 +252,66 @@ def validate_file_path(file_path: str, param_name: str = "file_path") -> str:
                 f"Invalid {param_name}: path traversal sequences are not allowed."
             )
 
-    # resolve the full real path (resolves symlinks AND relative
-    # paths against CWD) then enforce the allow-list.
-    # realpath is used instead of normpath to prevent symlink-escape attacks
-    # where /tmp/evil.key → /etc/passwd would pass a lexical deny-list check.
-    real_path = os.path.realpath(os.path.abspath(file_path))
-    allowed_dirs = _get_allowed_key_dirs()
+    # ------------------------------------------------------------------ #
+    # Phase 1: string-only normalization — ZERO filesystem access on the  #
+    # user-supplied path.  Rejects obvious out-of-bounds paths             #
+    # (e.g. /etc/passwd, /Users/…/secret.key) immediately.                #
+    #                                                                      #
+    # The allowed-dir set is the union of:                                 #
+    #   • raw_allowed_dirs  (normpath+abspath of configured dirs)          #
+    #   • real_allowed_dirs (realpath of configured dirs)                  #
+    # Both are derived from *trusted* configured values — calling realpath #
+    # on them is safe.  Including both handles OS-level symlinks in the    #
+    # allowed-dir list itself (e.g. /tmp → /private/tmp on macOS): a       #
+    # relative "logo.png" with CWD=/private/tmp normalises to             #
+    # /private/tmp/logo.png, which only matches the realpath form.         #
+    # An absolute /tmp/logo.png normalises to /tmp/logo.png, which only   #
+    # matches the raw form.  Checking both means both work correctly       #
+    # without ever calling realpath on the user-supplied value.            #
+    # ------------------------------------------------------------------ #
+    normalized_path = os.path.normpath(os.path.abspath(file_path))
+    raw_allowed_dirs = _get_raw_allowed_key_dirs()
+    real_allowed_dirs = _get_allowed_key_dirs()
+    # Deduplicate while preserving order (raw first, then real).
+    _phase1_dirs = tuple(dict.fromkeys((*raw_allowed_dirs, *real_allowed_dirs)))
     if not any(
-        real_path == allowed_dir or real_path.startswith(allowed_dir + os.sep)
-        for allowed_dir in allowed_dirs
+        normalized_path == d or normalized_path.startswith(d + os.sep)
+        for d in _phase1_dirs
     ):
-        allowed_display = os.pathsep.join(allowed_dirs) if allowed_dirs else "(none configured)"
+        # Use raw dirs in the display message (shows the logical/configured paths).
+        allowed_display = os.pathsep.join(raw_allowed_dirs) if raw_allowed_dirs else "(none configured)"
         logger.warning(
-            f"Rejected {param_name}: resolved path {_sanitize_for_log(real_path)!r} "
-            f"is outside permitted directories ({allowed_display})"
+            f"Rejected {param_name}: normalized path is outside permitted directories "
+            f"({allowed_display}): {_sanitize_for_log(file_path)!r}"
         )
         raise InvalidFilePathError(
-            f"Invalid {param_name}: the path resolves to {real_path!r}, which is "
-            f"outside the permitted directories ({allowed_display}). "
+            f"Invalid {param_name}: the path is outside the permitted directories "
+            f"({allowed_display}). "
+            f"Place the file inside a permitted directory or configure allowed "
+            f"directories via the {ALLOWED_KEY_DIRS_ENV} environment variable."
+        )
+
+    # ------------------------------------------------------------------ #
+    # Phase 2: realpath-based symlink-escape check.                        #
+    # Only reached for paths that passed Phase 1, so filesystem access is  #
+    # scoped to paths already confirmed to be near the allow-list.         #
+    # The resolved realpath is intentionally excluded from the error        #
+    # message to prevent information disclosure of symlink targets.         #
+    # ------------------------------------------------------------------ #
+    real_path = os.path.realpath(os.path.abspath(file_path))
+    real_allowed_dirs = _get_allowed_key_dirs()
+    if not any(
+        real_path == real_dir or real_path.startswith(real_dir + os.sep)
+        for real_dir in real_allowed_dirs
+    ):
+        allowed_display = os.pathsep.join(real_allowed_dirs) if real_allowed_dirs else "(none configured)"
+        logger.warning(
+            f"Rejected {param_name}: resolved path is outside permitted directories "
+            f"({allowed_display}): {_sanitize_for_log(file_path)!r}"
+        )
+        raise InvalidFilePathError(
+            f"Invalid {param_name}: the path resolves outside the permitted directories "
+            f"({allowed_display}). Symlink escapes are not permitted. "
             f"Place the file inside a permitted directory or configure allowed "
             f"directories via the {ALLOWED_KEY_DIRS_ENV} environment variable."
         )
