@@ -87,6 +87,12 @@ def _serialize(obj) -> Any:
     output, so calling it would silently return ``{}`` or just ``_links``.
     ``model_dump`` does not apply that exclusion and is therefore the correct
     serialisation path for response objects.
+
+    ``mode='json'`` is required to ensure that any SDK enum values nested
+    inside ``_links`` (e.g. ``HttpMethod.GET``) are serialised to their
+    primitive string equivalents (e.g. ``"GET"``) rather than left as Python
+    enum instances, which would cause JSON serialisation to fail downstream
+    and result in an empty ``{}`` being returned to the caller.
     """
     if obj is None:
         return None
@@ -94,7 +100,7 @@ def _serialize(obj) -> Any:
         return [_serialize(item) for item in obj]
     if hasattr(obj, "model_dump"):
         try:
-            return obj.model_dump(by_alias=True, exclude_none=True)
+            return obj.model_dump(by_alias=True, exclude_none=True, mode="json")
         except Exception:
             logger.debug(f"model_dump failed for {type(obj).__name__}, falling back to __dict__")
     if hasattr(obj, "__dict__"):
@@ -690,8 +696,27 @@ async def get_email_default_content_preview(
         preview, _, err = await client.get_email_default_preview(brand_id, template_name, language=language)
 
         if err:
-            logger.error(f"Okta API error getting default preview for template '{template_name}' on brand {brand_id}: {err}")
-            return {"error": str(err)}
+            err_str = str(err)
+            logger.error(f"Okta API error getting default preview for template '{template_name}' on brand {brand_id}: {err_str}")
+            # Okta's preview endpoint resolves the API token to a real user to
+            # populate sample values (e.g. name, username).  OAuth 2.0 service
+            # tokens (Client Credentials / private-key flow) are not tied to a
+            # human user, so Okta cannot find the user and returns 404.
+            if "E0000007" in err_str or "Not found" in err_str:
+                return {
+                    "error": (
+                        "The email default content preview is not available when using an OAuth 2.0 "
+                        "service token (Client Credentials / private-key flow). Okta requires a real "
+                        "user identity to render the preview with sample values, but service tokens "
+                        "are not associated with a human user.\n\n"
+                        "Suggested alternatives:\n"
+                        "  1. Use 'get_email_default_content' to retrieve the raw template with "
+                        "${variable} placeholders instead of resolved values.\n"
+                        "  2. Configure the MCP server with an SSWS API token tied to a real Okta "
+                        "user to enable full preview rendering."
+                    )
+                }
+            return {"error": err_str}
 
         logger.info(f"Successfully retrieved default content preview for template '{template_name}' on brand: {brand_id}")
         return _serialize(preview) or {}
