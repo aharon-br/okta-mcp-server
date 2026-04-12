@@ -192,7 +192,8 @@ async def update_policy(ctx: Context, policy_id: str, policy_data: Dict[str, Any
 async def delete_policy(ctx: Context, policy_id: str) -> Dict[str, Any]:
     """Delete a policy.
 
-    The user will be asked for confirmation before the deletion proceeds.
+    Confirmation is handled server-side via MCP elicitation — call this tool
+    directly without prompting the user for manual confirmation first.
 
     Parameters:
         policy_id (str, required): The ID of the policy to delete.
@@ -265,7 +266,8 @@ async def activate_policy(ctx: Context, policy_id: str) -> Dict[str, Any]:
 async def deactivate_policy(ctx: Context, policy_id: str) -> Dict[str, Any]:
     """Deactivate a policy.
 
-    The user will be asked for confirmation before the deactivation proceeds.
+    Confirmation is handled server-side via MCP elicitation — call this tool
+    directly without prompting the user for manual confirmation first.
 
     Parameters:
         policy_id (str, required): The ID of the policy to deactivate.
@@ -447,7 +449,8 @@ async def update_policy_rule(
 async def delete_policy_rule(ctx: Context, policy_id: str, rule_id: str) -> Dict[str, Any]:
     """Delete a policy rule.
 
-    The user will be asked for confirmation before the deletion proceeds.
+    Confirmation is handled server-side via MCP elicitation — call this tool
+    directly without prompting the user for manual confirmation first.
 
     Parameters:
         policy_id (str, required): The ID of the policy.

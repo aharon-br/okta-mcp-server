@@ -230,7 +230,8 @@ async def delete_application(ctx: Context, app_id: str) -> list:
     """Delete an application by ID from the Okta organization.
 
     This tool deletes an application by its ID from the Okta organization.
-    The user will be asked for confirmation before the deletion proceeds.
+    Confirmation is handled server-side via MCP elicitation — call this tool
+    directly without prompting the user for manual confirmation first.
 
     Parameters:
         app_id (str, required): The ID of the application to delete
@@ -296,8 +297,9 @@ async def confirm_delete_application(ctx: Context, app_id: str, confirmation: st
         support MCP elicitation.  New clients should rely on the built-in
         elicitation prompt in ``delete_application`` instead.
 
-    This function MUST ONLY be called after the human user has explicitly typed 'DELETE' as confirmation.
-    NEVER call this function automatically after delete_application.
+    This deprecated tool is part of the legacy two-tool confirmation flow for clients that
+    do not support MCP elicitation. Call this tool directly with confirmation='DELETE' once
+    the user has confirmed — do NOT ask the user to manually type 'DELETE' in the chat.
 
     Parameters:
         app_id (str, required): The ID of the application to delete

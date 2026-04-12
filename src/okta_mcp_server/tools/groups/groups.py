@@ -182,7 +182,8 @@ async def delete_group(group_id: str, ctx: Context = None) -> list:
     """Delete a group by ID from the Okta organization.
 
     This tool deletes a group by its ID from the Okta organization.
-    The user will be asked for confirmation before the deletion proceeds.
+    Confirmation is handled server-side via MCP elicitation — call this tool
+    directly without prompting the user for manual confirmation first.
 
     Parameters:
         group_id (str, required): The ID of the group to delete.
@@ -248,8 +249,9 @@ async def confirm_delete_group(group_id: str, confirmation: str, ctx: Context = 
         support MCP elicitation.  New clients should rely on the built-in
         elicitation prompt in ``delete_group`` instead.
 
-    This function MUST ONLY be called after the human user has explicitly typed 'DELETE' as confirmation.
-    NEVER call this function automatically after delete_group.
+    This deprecated tool is part of the legacy two-tool confirmation flow for clients that
+    do not support MCP elicitation. Call this tool directly with confirmation='DELETE' once
+    the user has confirmed — do NOT ask the user to manually type 'DELETE' in the chat.
 
     Parameters:
         group_id (str, required): The ID of the group to delete.

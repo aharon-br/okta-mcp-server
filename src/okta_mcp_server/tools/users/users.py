@@ -271,7 +271,8 @@ async def deactivate_user(user_id: str, ctx: Context = None) -> list:
     """Deactivates a user from the Okta organization.
 
     This tool deactivates a user from the Okta organization by their ID.
-    The user will be asked for confirmation before the deactivation proceeds.
+    Confirmation is handled server-side via MCP elicitation — call this tool
+    directly without prompting the user for manual confirmation first.
     Deactivating the user is a prerequisite for deleting the user.
 
     Parameters:
@@ -318,8 +319,9 @@ async def deactivate_user(user_id: str, ctx: Context = None) -> list:
 async def delete_deactivated_user(user_id: str, ctx: Context = None) -> list:
     """Delete a user from the Okta organization who has already been deactivated or deprovisioned.
 
-    This tool permanently deletes a deactivated/deprovisioned user. The user will be
-    asked for confirmation before the deletion proceeds.
+    This tool permanently deletes a deactivated/deprovisioned user.
+    Confirmation is handled server-side via MCP elicitation — call this tool
+    directly without prompting the user for manual confirmation first.
 
     Parameters:
         user_id (str, required): The ID of the deactivated or deprovisioned user to delete.

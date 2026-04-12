@@ -655,7 +655,8 @@ async def delete_device_assurance_policy(
 ) -> Dict[str, Any]:
     """Delete a Device Assurance Policy from the Okta organization.
 
-    The user will be asked for confirmation before the deletion proceeds.
+    Confirmation is handled server-side via MCP elicitation — call this tool
+    directly without prompting the user for manual confirmation first.
     Note: A policy that is currently assigned to an authentication policy
     cannot be deleted.
 
