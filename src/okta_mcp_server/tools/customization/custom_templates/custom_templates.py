@@ -142,8 +142,9 @@ async def list_email_templates(
             logger.error(f"Okta API error listing email templates for brand {brand_id}: {err}")
             return {"error": str(err)}
 
-        logger.info(f"Successfully listed {len(templates)} email templates for brand: {brand_id}")
-        return _serialize(templates) or []
+        result = _serialize(templates) or []
+        logger.info(f"Successfully listed {len(result)} email templates for brand: {brand_id}")
+        return result
 
     except Exception as e:
         logger.error(f"Exception listing email templates for brand {brand_id}: {type(e).__name__}: {e}")
@@ -231,8 +232,9 @@ async def list_email_customizations(
             logger.error(f"Okta API error listing customizations for template '{template_name}' on brand {brand_id}: {err}")
             return {"error": str(err)}
 
-        logger.info(f"Successfully listed {len(customizations)} customizations for template '{template_name}' on brand: {brand_id}")
-        return _serialize(customizations) or []
+        result = _serialize(customizations) or []
+        logger.info(f"Successfully listed {len(result)} customizations for template '{template_name}' on brand: {brand_id}")
+        return result
 
     except Exception as e:
         logger.error(f"Exception listing customizations for template '{template_name}' on brand {brand_id}: {type(e).__name__}: {e}")

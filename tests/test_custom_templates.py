@@ -32,10 +32,14 @@ import pytest
 from okta.models.email_preview import EmailPreview
 from okta.models.email_preview_links import EmailPreviewLinks
 
+from okta.models.email_template_response import EmailTemplateResponse
+
 from okta_mcp_server.tools.customization.custom_templates.custom_templates import (
     _serialize,
     get_email_customization_preview,
     get_email_default_content_preview,
+    list_email_customizations,
+    list_email_templates,
 )
 
 # ---------------------------------------------------------------------------
@@ -427,3 +431,272 @@ class TestGetEmailCustomizationPreview:
         # @validate_ids returns a list with a single error string
         assert isinstance(result, list)
         assert any("customization_id" in str(item).lower() or "invalid" in str(item).lower() for item in result)
+
+
+# ===========================================================================
+# list_email_templates — tool tests
+# Reproduces: list_email_templates Returns Empty List for Valid Brand
+#
+# Root cause: when the Okta SDK returns (None, resp, None) — which it does
+# whenever response_body == "" or response.status == 204 — the old code called
+# len(templates) before the None guard, raising
+# TypeError: object of type 'NoneType' has no len()
+# That exception was caught and returned as {"error": "..."}, a dict.
+# MCP's return-type validation then raised a second error because the declared
+# return type is List[Dict[str, Any]], not Dict.
+#
+# Fix: compute the serialized result first, then log its length.
+# ===========================================================================
+
+def _make_template(name: str = "UserActivation") -> EmailTemplateResponse:
+    """Return a minimal EmailTemplateResponse."""
+    return EmailTemplateResponse(name=name)
+
+
+class TestListEmailTemplates:
+    """Tests for the list_email_templates MCP tool."""
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_returns_list_of_templates(self, mock_get_client, ctx_no_elicitation):
+        """Happy path: SDK returns a list of templates; tool returns serialized list."""
+        templates = [_make_template("UserActivation"), _make_template("ForgotPassword")]
+        client = AsyncMock()
+        client.list_email_templates.return_value = (templates, MagicMock(), None)
+        mock_get_client.return_value = client
+
+        result = await list_email_templates(
+            ctx=ctx_no_elicitation,
+            brand_id=BRAND_ID,
+        )
+
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["name"] == "UserActivation"
+        assert result[1]["name"] == "ForgotPassword"
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_sdk_returns_none_templates_yields_empty_list(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        """Regression: SDK may return (None, resp, None); tool must return [] not crash.
+
+        Before the fix, len(None) raised TypeError which was caught and returned
+        as {"error": "object of type 'NoneType' has no len()"}.  MCP then raised
+        a validation error because the return type is List, not Dict.
+        """
+        client = AsyncMock()
+        client.list_email_templates.return_value = (None, MagicMock(), None)
+        mock_get_client.return_value = client
+
+        result = await list_email_templates(
+            ctx=ctx_no_elicitation,
+            brand_id=BRAND_ID,
+        )
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_returns_error_dict_on_api_error(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        """When the SDK surfaces an API error the tool returns {"error": ...}."""
+        client = AsyncMock()
+        client.list_email_templates.return_value = (None, MagicMock(), "403 Forbidden")
+        mock_get_client.return_value = client
+
+        result = await list_email_templates(
+            ctx=ctx_no_elicitation,
+            brand_id=BRAND_ID,
+        )
+
+        assert isinstance(result, dict)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_returns_error_dict_on_exception(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        """Unhandled exceptions are caught and returned as {"error": ...}."""
+        mock_get_client.side_effect = Exception("connection refused")
+
+        result = await list_email_templates(
+            ctx=ctx_no_elicitation,
+            brand_id=BRAND_ID,
+        )
+
+        assert isinstance(result, dict)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_passes_expand_to_sdk(self, mock_get_client, ctx_no_elicitation):
+        """The expand list is forwarded to the SDK call unchanged."""
+        client = AsyncMock()
+        client.list_email_templates.return_value = ([], MagicMock(), None)
+        mock_get_client.return_value = client
+
+        await list_email_templates(
+            ctx=ctx_no_elicitation,
+            brand_id=BRAND_ID,
+            expand=["settings", "customizationCount"],
+        )
+
+        client.list_email_templates.assert_called_once_with(
+            BRAND_ID, expand=["settings", "customizationCount"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_invalid_brand_id_returns_error_without_api_call(
+        self, ctx_no_elicitation
+    ):
+        """@validate_ids rejects path-traversal brand IDs before any SDK call."""
+        result = await list_email_templates(
+            ctx=ctx_no_elicitation,
+            brand_id="../../etc/passwd",
+        )
+
+        assert isinstance(result, list)
+        assert any(
+            "brand_id" in str(item).lower() or "invalid" in str(item).lower()
+            for item in result
+        )
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_empty_sdk_list_returns_empty_list(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        """An empty list from the SDK is returned as-is (not converted to None or {})."""
+        client = AsyncMock()
+        client.list_email_templates.return_value = ([], MagicMock(), None)
+        mock_get_client.return_value = client
+
+        result = await list_email_templates(
+            ctx=ctx_no_elicitation,
+            brand_id=BRAND_ID,
+        )
+
+        assert result == []
+
+
+# ===========================================================================
+# list_email_customizations — tool tests
+# Same None-guard fix applied defensively.
+# ===========================================================================
+
+class TestListEmailCustomizations:
+    """Tests for the list_email_customizations MCP tool."""
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_returns_list_of_customizations(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        """Happy path: SDK returns a list; tool returns serialized list."""
+        from okta.models.email_customization import EmailCustomization
+
+        cust = EmailCustomization(language="en", subject="Hello", body="<p>Hi</p>")
+        client = AsyncMock()
+        client.list_email_customizations.return_value = ([cust], MagicMock(), None)
+        mock_get_client.return_value = client
+
+        result = await list_email_customizations(
+            ctx=ctx_no_elicitation,
+            brand_id=BRAND_ID,
+            template_name=TEMPLATE_NAME,
+        )
+
+        assert isinstance(result, list)
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_sdk_returns_none_customizations_yields_empty_list(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        """SDK returning (None, resp, None) must produce [] not a TypeError crash."""
+        client = AsyncMock()
+        client.list_email_customizations.return_value = (None, MagicMock(), None)
+        mock_get_client.return_value = client
+
+        result = await list_email_customizations(
+            ctx=ctx_no_elicitation,
+            brand_id=BRAND_ID,
+            template_name=TEMPLATE_NAME,
+        )
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_returns_error_dict_on_api_error(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        client = AsyncMock()
+        client.list_email_customizations.return_value = (None, MagicMock(), "404 Not Found")
+        mock_get_client.return_value = client
+
+        result = await list_email_customizations(
+            ctx=ctx_no_elicitation,
+            brand_id=BRAND_ID,
+            template_name=TEMPLATE_NAME,
+        )
+
+        assert isinstance(result, dict)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_returns_error_dict_on_exception(
+        self, mock_get_client, ctx_no_elicitation
+    ):
+        mock_get_client.side_effect = Exception("network failure")
+
+        result = await list_email_customizations(
+            ctx=ctx_no_elicitation,
+            brand_id=BRAND_ID,
+            template_name=TEMPLATE_NAME,
+        )
+
+        assert isinstance(result, dict)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_invalid_brand_id_returns_error_without_api_call(
+        self, ctx_no_elicitation
+    ):
+        result = await list_email_customizations(
+            ctx=ctx_no_elicitation,
+            brand_id="not valid!",
+            template_name=TEMPLATE_NAME,
+        )
+
+        assert isinstance(result, list)
+        assert any(
+            "brand_id" in str(item).lower() or "invalid" in str(item).lower()
+            for item in result
+        )
