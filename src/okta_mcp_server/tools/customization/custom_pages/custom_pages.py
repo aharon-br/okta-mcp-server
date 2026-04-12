@@ -153,7 +153,9 @@ async def get_error_page_resources(
 
     try:
         client = await get_okta_client(manager)
-        page_root, _, err = await client.get_error_page(brand_id, expand)
+        result = await client.get_error_page(brand_id, expand)
+        page_root = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error getting error page resources for brand {brand_id}: {err}")
@@ -195,7 +197,9 @@ async def get_customized_error_page(
 
     try:
         client = await get_okta_client(manager)
-        page, _, err = await client.get_customized_error_page(brand_id)
+        result = await client.get_customized_error_page(brand_id)
+        page = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error getting customized error page for brand {brand_id}: {err}")
@@ -252,7 +256,9 @@ async def replace_customized_error_page(
             page_content=page_content,
             content_security_policy_setting=csp,
         )
-        page, _, err = await client.replace_customized_error_page(brand_id, error_page)
+        result = await client.replace_customized_error_page(brand_id, error_page)
+        page = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error replacing customized error page for brand {brand_id}: {err}")
@@ -298,7 +304,8 @@ async def delete_customized_error_page(
 
     try:
         client = await get_okta_client(manager)
-        _, _, err = await client.delete_customized_error_page(brand_id)
+        result = await client.delete_customized_error_page(brand_id)
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error deleting customized error page for brand {brand_id}: {err}")
@@ -339,7 +346,9 @@ async def get_default_error_page(
 
     try:
         client = await get_okta_client(manager)
-        page, _, err = await client.get_default_error_page(brand_id)
+        result = await client.get_default_error_page(brand_id)
+        page = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error getting default error page for brand {brand_id}: {err}")
@@ -380,7 +389,9 @@ async def get_preview_error_page(
 
     try:
         client = await get_okta_client(manager)
-        page, _, err = await client.get_preview_error_page(brand_id)
+        result = await client.get_preview_error_page(brand_id)
+        page = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error getting preview error page for brand {brand_id}: {err}")
@@ -434,7 +445,9 @@ async def replace_preview_error_page(
             page_content=page_content,
             content_security_policy_setting=csp,
         )
-        page, _, err = await client.replace_preview_error_page(brand_id, error_page)
+        result = await client.replace_preview_error_page(brand_id, error_page)
+        page = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error replacing preview error page for brand {brand_id}: {err}")
@@ -480,7 +493,8 @@ async def delete_preview_error_page(
 
     try:
         client = await get_okta_client(manager)
-        _, _, err = await client.delete_preview_error_page(brand_id)
+        result = await client.delete_preview_error_page(brand_id)
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error deleting preview error page for brand {brand_id}: {err}")
@@ -526,7 +540,9 @@ async def get_sign_in_page_resources(
 
     try:
         client = await get_okta_client(manager)
-        page_root, _, err = await client.get_sign_in_page(brand_id, expand)
+        result = await client.get_sign_in_page(brand_id, expand)
+        page_root = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error getting sign-in page resources for brand {brand_id}: {err}")
@@ -568,7 +584,9 @@ async def get_customized_sign_in_page(
 
     try:
         client = await get_okta_client(manager)
-        page, _, err = await client.get_customized_sign_in_page(brand_id)
+        result = await client.get_customized_sign_in_page(brand_id)
+        page = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error getting customized sign-in page for brand {brand_id}: {err}")
@@ -640,7 +658,9 @@ async def replace_customized_sign_in_page(
         client = await get_okta_client(manager)
         csp = _build_csp(csp_mode, csp_report_uri, csp_src_list)
         sign_in_page = _build_sign_in_page(page_content, widget_version, widget_customizations, csp)
-        page, _, err = await client.replace_customized_sign_in_page(brand_id, sign_in_page)
+        result = await client.replace_customized_sign_in_page(brand_id, sign_in_page)
+        page = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error replacing customized sign-in page for brand {brand_id}: {err}")
@@ -687,7 +707,8 @@ async def delete_customized_sign_in_page(
 
     try:
         client = await get_okta_client(manager)
-        _, _, err = await client.delete_customized_sign_in_page(brand_id)
+        result = await client.delete_customized_sign_in_page(brand_id)
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error deleting customized sign-in page for brand {brand_id}: {err}")
@@ -730,7 +751,9 @@ async def get_default_sign_in_page(
 
     try:
         client = await get_okta_client(manager)
-        page, _, err = await client.get_default_sign_in_page(brand_id)
+        result = await client.get_default_sign_in_page(brand_id)
+        page = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error getting default sign-in page for brand {brand_id}: {err}")
@@ -772,7 +795,9 @@ async def get_preview_sign_in_page(
 
     try:
         client = await get_okta_client(manager)
-        page, _, err = await client.get_preview_sign_in_page(brand_id)
+        result = await client.get_preview_sign_in_page(brand_id)
+        page = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error getting preview sign-in page for brand {brand_id}: {err}")
@@ -833,7 +858,9 @@ async def replace_preview_sign_in_page(
         client = await get_okta_client(manager)
         csp = _build_csp(csp_mode, csp_report_uri, csp_src_list)
         sign_in_page = _build_sign_in_page(page_content, widget_version, widget_customizations, csp)
-        page, _, err = await client.replace_preview_sign_in_page(brand_id, sign_in_page)
+        result = await client.replace_preview_sign_in_page(brand_id, sign_in_page)
+        page = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error replacing preview sign-in page for brand {brand_id}: {err}")
@@ -880,7 +907,8 @@ async def delete_preview_sign_in_page(
 
     try:
         client = await get_okta_client(manager)
-        _, _, err = await client.delete_preview_sign_in_page(brand_id)
+        result = await client.delete_preview_sign_in_page(brand_id)
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error deleting preview sign-in page for brand {brand_id}: {err}")
@@ -926,7 +954,9 @@ async def list_sign_in_widget_versions(
 
     try:
         client = await get_okta_client(manager)
-        versions, _, err = await client.list_all_sign_in_widget_versions(brand_id)
+        result = await client.list_all_sign_in_widget_versions(brand_id)
+        versions = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error listing widget versions for brand {brand_id}: {err}")
@@ -975,7 +1005,9 @@ async def get_sign_out_page_settings(
 
     try:
         client = await get_okta_client(manager)
-        settings, _, err = await client.get_sign_out_page_settings(brand_id)
+        result = await client.get_sign_out_page_settings(brand_id)
+        settings = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error getting sign-out page settings for brand {brand_id}: {err}")
@@ -1032,7 +1064,9 @@ async def replace_sign_out_page_settings(
             type=HostedPageType(type_upper),
             url=url,
         )
-        settings, _, err = await client.replace_sign_out_page_settings(brand_id, hosted_page)
+        result = await client.replace_sign_out_page_settings(brand_id, hosted_page)
+        settings = result[0]
+        err = result[-1]
 
         if err:
             logger.error(f"Okta API error replacing sign-out page settings for brand {brand_id}: {err}")

@@ -425,7 +425,8 @@ async def upsert_custom_domain_certificate(
             private_key=private_key,
             type=DomainCertificateType("PEM"),
         )
-        _, _, err = await client.upsert_certificate(domain_id, cert_obj)
+        result = await client.upsert_certificate(domain_id, cert_obj)
+        err = result[-1]
 
         if err:
             logger.error(
