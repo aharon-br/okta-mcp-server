@@ -329,6 +329,41 @@ async def delete_deactivated_user(user_id: str, ctx: Context = None) -> list:
     """
     logger.info(f"Deletion requested for deactivated user: {user_id}")
 
+    manager = ctx.request_context.lifespan_context.okta_auth_manager
+
+    try:
+        client = await get_okta_client(manager)
+
+        # Check the user's current status before attempting deletion.
+        # The Okta API's DELETE endpoint behaves differently based on user state:
+        #   - ACTIVE / any non-deprovisioned state → transitions to DEPROVISIONED (does NOT delete)
+        #   - DEPROVISIONED → permanently deletes the user
+        # Without this check the tool would silently deactivate an active user and
+        # return a misleading "User deleted successfully" message.
+        logger.debug(f"Fetching current status for user {user_id} before deletion")
+        user, _, get_err = await client.get_user(user_id)
+
+        if get_err:
+            logger.error(f"Okta API error while fetching user {user_id} before deletion: {get_err}")
+            return [f"Error: {get_err}"]
+
+        user_status = getattr(user, "status", None)
+        logger.debug(f"User {user_id} current status: {user_status}")
+
+        if user_status != "DEPROVISIONED":
+            logger.warning(
+                f"Deletion rejected for user {user_id}: status is '{user_status}', expected 'DEPROVISIONED'"
+            )
+            return [
+                f"Error: User {user_id} cannot be permanently deleted because their current status is "
+                f"'{user_status}'. Only users in 'DEPROVISIONED' state can be permanently deleted. "
+                f"Please deactivate the user first using the deactivate_user tool, then retry."
+            ]
+
+    except Exception as e:
+        logger.error(f"Exception while checking user {user_id} status: {type(e).__name__}: {e}")
+        return [f"Exception: {e}"]
+
     outcome = await elicit_or_fallback(
         ctx,
         message=DELETE_USER.format(user_id=user_id),
@@ -340,11 +375,8 @@ async def delete_deactivated_user(user_id: str, ctx: Context = None) -> list:
         logger.info(f"User deletion cancelled for {user_id}")
         return [{"message": "User deletion cancelled by user."}]
 
-    manager = ctx.request_context.lifespan_context.okta_auth_manager
-
     try:
-        client = await get_okta_client(manager)
-        logger.debug(f"Calling Okta API to delete user {user_id}")
+        logger.debug(f"Calling Okta API to permanently delete deprovisioned user {user_id}")
 
         result = await client.delete_user(user_id)
         err = result[-1]
@@ -353,8 +385,8 @@ async def delete_deactivated_user(user_id: str, ctx: Context = None) -> list:
             logger.error(f"Okta API error while deleting user {user_id}: {err}")
             return [f"Error: {err}"]
 
-        logger.info(f"Successfully deleted user: {user_id}")
-        return [f"User {user_id} deleted successfully."]
+        logger.info(f"Successfully permanently deleted user: {user_id}")
+        return [f"User {user_id} permanently deleted successfully."]
     except Exception as e:
         logger.error(f"Exception while deleting user {user_id}: {type(e).__name__}: {e}")
         return [f"Exception: {e}"]
