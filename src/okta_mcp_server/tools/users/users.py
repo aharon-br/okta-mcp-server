@@ -58,7 +58,9 @@ async def list_users(
 
     Returns:
         Dict containing:
-        - items: List of (user.profile, user.id) tuples
+        - items: List of dicts with keys 'id', 'profile', and 'status'
+          (status values: STAGED, PROVISIONED, ACTIVE, RECOVERY, LOCKED_OUT,
+           PASSWORD_EXPIRED, SUSPENDED, DEPROVISIONED)
         - total_fetched: Number of users returned
         - has_more: Boolean indicating if more results are available
         - next_cursor: Cursor for the next page (if has_more is True)
@@ -96,13 +98,14 @@ async def list_users(
             logger.info("No users found")
             return create_paginated_response([], response, fetch_all_used=fetch_all)
 
-        # Convert users to the expected format
-        user_items = [(user.profile, user.id) for user in users]
+        # Convert users to the expected format — include status so the LLM can
+        # decide whether deactivation is needed before calling deactivate_user.
+        user_items = [{"id": user.id, "profile": user.profile, "status": user.status} for user in users]
 
         if fetch_all and response and hasattr(response, "has_next") and response.has_next():
             logger.info(f"fetch_all=True, auto-paginating from initial {len(users)} users")
             all_users, pagination_info = await paginate_all_results(response, users)
-            all_user_items = [(user.profile, user.id) for user in all_users]
+            all_user_items = [{"id": user.id, "profile": user.profile, "status": user.status} for user in all_users]
 
             logger.info(
                 f"Successfully retrieved {len(all_user_items)} users across {pagination_info['pages_fetched']} pages"
@@ -275,6 +278,11 @@ async def deactivate_user(user_id: str, ctx: Context = None) -> list:
     directly without prompting the user for manual confirmation first.
     Deactivating the user is a prerequisite for deleting the user.
 
+    IMPORTANT: Do NOT call this tool if the user's status is already
+    'DEPROVISIONED'. In that case call delete_deactivated_user directly.
+    Only call this tool for users whose status is ACTIVE, STAGED,
+    PROVISIONED, RECOVERY, LOCKED_OUT, PASSWORD_EXPIRED, or SUSPENDED.
+
     Parameters:
         user_id (str, required): The ID of the user to deactivate.
 
@@ -282,6 +290,36 @@ async def deactivate_user(user_id: str, ctx: Context = None) -> list:
         List containing the result of the deactivation operation.
     """
     logger.info(f"Deactivation requested for user: {user_id}")
+
+    manager = ctx.request_context.lifespan_context.okta_auth_manager
+
+    try:
+        client = await get_okta_client(manager)
+
+        # Guard: check current status before attempting deactivation.
+        # Calling the Okta deactivate endpoint on a DEPROVISIONED user returns
+        # a 404 error because the Okta API treats DEPROVISIONED users as
+        # effectively non-existent for lifecycle operations.
+        logger.debug(f"Fetching current status for user {user_id} before deactivation")
+        user, _, get_err = await client.get_user(user_id)
+
+        if get_err:
+            logger.error(f"Okta API error while fetching user {user_id} before deactivation: {get_err}")
+            return [f"Error: {get_err}"]
+
+        user_status = getattr(user, "status", None)
+        logger.debug(f"User {user_id} current status: {user_status}")
+
+        if user_status == "DEPROVISIONED":
+            logger.info(f"Skipping deactivation for user {user_id}: already DEPROVISIONED")
+            return [
+                f"User {user_id} is already in DEPROVISIONED state — deactivation is not needed. "
+                f"Call delete_deactivated_user to permanently delete this user."
+            ]
+
+    except Exception as e:
+        logger.error(f"Exception while checking user {user_id} status: {type(e).__name__}: {e}")
+        return [f"Exception: {e}"]
 
     outcome = await elicit_or_fallback(
         ctx,
@@ -294,10 +332,7 @@ async def deactivate_user(user_id: str, ctx: Context = None) -> list:
         logger.info(f"User deactivation cancelled for {user_id}")
         return [{"message": "User deactivation cancelled by user."}]
 
-    manager = ctx.request_context.lifespan_context.okta_auth_manager
-
     try:
-        client = await get_okta_client(manager)
         logger.debug(f"Calling Okta API to deactivate user {user_id}")
 
         result = await client.deactivate_user(user_id)

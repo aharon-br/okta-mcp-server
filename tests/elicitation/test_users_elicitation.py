@@ -23,36 +23,116 @@ USER_ID = "00u1234567890ABCDEF"
 
 
 # ===================================================================
+# deactivate_user — status guard (DEPROVISIONED pre-check)
+# ===================================================================
+
+def _make_active_client():
+    """Return an AsyncMock client whose get_user returns an ACTIVE user."""
+    client = AsyncMock()
+    active_user = MagicMock()
+    active_user.status = "ACTIVE"
+    client.get_user.return_value = (active_user, None, None)
+    client.deactivate_user.return_value = (None, None)
+    return client
+
+
+class TestDeactivateUserStatusGuard:
+    """Tests for the status pre-check added to deactivate_user.
+
+    Calling deactivate_user on a DEPROVISIONED user would result in a 404
+    from the Okta API because the lifecycle endpoint is unavailable for users
+    in that state.  The guard detects this early and returns clear guidance.
+    """
+
+    @pytest.mark.asyncio
+    @patch("okta_mcp_server.tools.users.users.get_okta_client")
+    async def test_deprovisioned_user_returns_guidance_without_deactivating(
+        self, mock_get_client, ctx_elicit_accept_true
+    ):
+        """Calling the tool on a DEPROVISIONED user must return guidance, never deactivate."""
+        client = AsyncMock()
+        deprovisioned_user = MagicMock()
+        deprovisioned_user.status = "DEPROVISIONED"
+        client.get_user.return_value = (deprovisioned_user, None, None)
+        mock_get_client.return_value = client
+
+        result = await deactivate_user(user_id=USER_ID, ctx=ctx_elicit_accept_true)
+
+        client.deactivate_user.assert_not_awaited()
+        assert "DEPROVISIONED" in result[0]
+        assert "delete_deactivated_user" in result[0]
+
+    @pytest.mark.asyncio
+    @patch("okta_mcp_server.tools.users.users.get_okta_client")
+    async def test_get_user_api_error_returns_error_without_deactivating(
+        self, mock_get_client, ctx_elicit_accept_true
+    ):
+        """If get_user returns an API error the tool surfaces it without deactivating."""
+        client = AsyncMock()
+        client.get_user.return_value = (None, None, "API Error: user not found")
+        mock_get_client.return_value = client
+
+        result = await deactivate_user(user_id=USER_ID, ctx=ctx_elicit_accept_true)
+
+        client.deactivate_user.assert_not_awaited()
+        assert "Error" in result[0]
+
+    @pytest.mark.asyncio
+    @patch("okta_mcp_server.tools.users.users.get_okta_client")
+    async def test_get_user_exception_returns_exception(self, mock_get_client, ctx_elicit_accept_true):
+        """If get_user raises an exception the tool propagates it gracefully."""
+        mock_get_client.side_effect = Exception("Connection refused")
+
+        result = await deactivate_user(user_id=USER_ID, ctx=ctx_elicit_accept_true)
+
+        assert "Exception" in result[0]
+
+
+# ===================================================================
 # deactivate_user — elicitation flows
 # ===================================================================
 
 class TestDeactivateUserElicitation:
-    """Tests for deactivate_user when the client supports elicitation."""
+    """Tests for deactivate_user when the client supports elicitation.
+
+    All tests supply an ACTIVE user via get_user so the status guard passes
+    and execution reaches the elicitation / deactivation logic.
+    """
 
     @pytest.mark.asyncio
     @patch("okta_mcp_server.tools.users.users.get_okta_client")
-    async def test_accept_confirmed_deactivates(self, mock_get_client, ctx_elicit_accept_true, mock_okta_client):
-        mock_get_client.return_value = mock_okta_client
+    async def test_accept_confirmed_deactivates(self, mock_get_client, ctx_elicit_accept_true):
+        client = _make_active_client()
+        mock_get_client.return_value = client
 
         result = await deactivate_user(user_id=USER_ID, ctx=ctx_elicit_accept_true)
 
-        mock_okta_client.deactivate_user.assert_awaited_once_with(USER_ID)
+        client.deactivate_user.assert_awaited_once_with(USER_ID)
         assert "deactivated successfully" in result[0]
 
     @pytest.mark.asyncio
-    async def test_accept_not_confirmed_cancels(self, ctx_elicit_accept_false):
+    @patch("okta_mcp_server.tools.users.users.get_okta_client")
+    async def test_accept_not_confirmed_cancels(self, mock_get_client, ctx_elicit_accept_false):
+        mock_get_client.return_value = _make_active_client()
+
         result = await deactivate_user(user_id=USER_ID, ctx=ctx_elicit_accept_false)
 
         assert "cancelled" in result[0]["message"].lower()
 
     @pytest.mark.asyncio
-    async def test_decline_cancels(self, ctx_elicit_decline):
+    @patch("okta_mcp_server.tools.users.users.get_okta_client")
+    async def test_decline_cancels(self, mock_get_client, ctx_elicit_decline):
+        mock_get_client.return_value = _make_active_client()
+
         result = await deactivate_user(user_id=USER_ID, ctx=ctx_elicit_decline)
 
         assert "cancelled" in result[0]["message"].lower()
 
     @pytest.mark.asyncio
-    async def test_cancel_cancels(self, ctx_elicit_cancel):
+    @patch("okta_mcp_server.tools.users.users.get_okta_client")
+    async def test_cancel_cancels(self, mock_get_client, ctx_elicit_cancel):
+        mock_get_client.return_value = _make_active_client()
+
         result = await deactivate_user(user_id=USER_ID, ctx=ctx_elicit_cancel)
 
         assert "cancelled" in result[0]["message"].lower()
@@ -60,7 +140,7 @@ class TestDeactivateUserElicitation:
     @pytest.mark.asyncio
     @patch("okta_mcp_server.tools.users.users.get_okta_client")
     async def test_okta_api_error(self, mock_get_client, ctx_elicit_accept_true):
-        client = AsyncMock()
+        client = _make_active_client()
         client.deactivate_user.return_value = (None, "API Error: user not found")
         mock_get_client.return_value = client
 
@@ -91,22 +171,24 @@ class TestDeactivateUserFallback:
 
     @pytest.mark.asyncio
     @patch("okta_mcp_server.tools.users.users.get_okta_client")
-    async def test_fallback_proceeds_with_deactivation(self, mock_get_client, ctx_no_elicitation, mock_okta_client):
-        mock_get_client.return_value = mock_okta_client
+    async def test_fallback_proceeds_with_deactivation(self, mock_get_client, ctx_no_elicitation):
+        client = _make_active_client()
+        mock_get_client.return_value = client
 
         result = await deactivate_user(user_id=USER_ID, ctx=ctx_no_elicitation)
 
-        mock_okta_client.deactivate_user.assert_awaited_once_with(USER_ID)
+        client.deactivate_user.assert_awaited_once_with(USER_ID)
         assert "deactivated successfully" in result[0]
 
     @pytest.mark.asyncio
     @patch("okta_mcp_server.tools.users.users.get_okta_client")
-    async def test_exception_fallback_proceeds_with_deactivation(self, mock_get_client, ctx_elicit_exception, mock_okta_client):
-        mock_get_client.return_value = mock_okta_client
+    async def test_exception_fallback_proceeds_with_deactivation(self, mock_get_client, ctx_elicit_exception):
+        client = _make_active_client()
+        mock_get_client.return_value = client
 
         result = await deactivate_user(user_id=USER_ID, ctx=ctx_elicit_exception)
 
-        mock_okta_client.deactivate_user.assert_awaited_once_with(USER_ID)
+        client.deactivate_user.assert_awaited_once_with(USER_ID)
         assert "deactivated successfully" in result[0]
 
 
