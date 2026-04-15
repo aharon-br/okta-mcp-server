@@ -109,6 +109,43 @@ def _serialize(obj) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Internal helper — no-content response validation
+# ---------------------------------------------------------------------------
+
+def _check_no_content_response(result) -> Optional[str]:
+    """Validate SDK results for operations that return no body on success (HTTP 204).
+
+    The Okta Python SDK has a bug in ``send_test_email``,
+    ``delete_email_customization``, and ``delete_all_customizations``: it checks
+    ``if response_body == "" or response.status == 204:`` *before* examining the
+    error produced by ``check_response_for_error``.  Any response with an empty
+    body — including a 401 Unauthorized when the Bearer token is an SSWS token
+    used incorrectly — causes the SDK to discard the error and return
+    ``(None, ApiResponse(status=401), None)``.  The last element (``err``) is
+    ``None`` even though the call failed, so a plain ``if result[-1]:`` check
+    silently treats the failure as success.
+
+    This helper inspects **both** ``result[-1]`` (the SDK error field) and
+    ``result[1].status_code`` (the raw HTTP status) to catch empty-body failures.
+
+    Returns:
+        ``None`` when the call truly succeeded (2xx, no SDK error).
+        An error string describing the failure otherwise.
+    """
+    err = result[-1]
+    if err:
+        return str(err)
+    if len(result) > 1:
+        api_resp = result[1]
+        if hasattr(api_resp, "status_code") and not (200 <= api_resp.status_code <= 299):
+            return (
+                f"Okta returned HTTP {api_resp.status_code}. "
+                "The Bearer token may be expired or invalid — please re-authenticate and retry."
+            )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Templates — list & get
 # ---------------------------------------------------------------------------
 
@@ -495,11 +532,11 @@ async def delete_email_customization(
     try:
         client = await get_okta_client(manager)
         result = await client.delete_email_customization(brand_id, template_name, customization_id)
-        err = result[-1]
+        err_str = _check_no_content_response(result)
 
-        if err:
-            logger.error(f"Okta API error deleting customization {customization_id} for template '{template_name}' on brand {brand_id}: {err}")
-            return {"error": str(err)}
+        if err_str:
+            logger.error(f"Okta API error deleting customization {customization_id} for template '{template_name}' on brand {brand_id}: {err_str}")
+            return {"error": err_str}
 
         logger.info(f"Successfully deleted customization {customization_id} for template '{template_name}' on brand: {brand_id}")
         return {"success": True, "message": f"Email customization {customization_id} deleted."}
@@ -549,11 +586,11 @@ async def delete_all_email_customizations(
     try:
         client = await get_okta_client(manager)
         result = await client.delete_all_customizations(brand_id, template_name)
-        err = result[-1]
+        err_str = _check_no_content_response(result)
 
-        if err:
-            logger.error(f"Okta API error deleting all customizations for template '{template_name}' on brand {brand_id}: {err}")
-            return {"error": str(err)}
+        if err_str:
+            logger.error(f"Okta API error deleting all customizations for template '{template_name}' on brand {brand_id}: {err_str}")
+            return {"error": err_str}
 
         logger.info(f"Successfully deleted all customizations for template '{template_name}' on brand: {brand_id}")
         return {"success": True, "message": f"All customizations for email template '{template_name}' deleted."}
@@ -855,11 +892,22 @@ async def send_test_email(
     try:
         client = await get_okta_client(manager)
         result = await client.send_test_email(brand_id, template_name, language=language)
-        err = result[-1]
+        err_str = _check_no_content_response(result)
 
-        if err:
-            logger.error(f"Okta API error sending test email for template '{template_name}' on brand {brand_id}: {err}")
-            return {"error": str(err)}
+        if err_str:
+            logger.error(f"Okta API error sending test email for template '{template_name}' on brand {brand_id}: {err_str}")
+            # Okta's send_test_email endpoint sends to the user associated with the
+            # current OAuth token.  Client Credentials / service tokens have no 'uid'
+            # claim — there is no real user — so Okta returns 404 E0000007 or an
+            # empty-body 403.  Surface a clear, actionable message.
+            if "E0000007" in err_str or "Not found" in err_str or "HTTP 403" in err_str:
+                return {
+                    "error": (
+                        "This tool does not support Private Key JWT authentication. "
+                        "Please switch to Device Authorization Grant and try again."
+                    )
+                }
+            return {"error": err_str}
 
         logger.info(f"Successfully sent test email for template '{template_name}' on brand: {brand_id}")
         return {"success": True, "message": f"Test email for '{template_name}' sent successfully."}

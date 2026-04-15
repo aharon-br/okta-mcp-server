@@ -35,11 +35,13 @@ from okta.models.email_preview_links import EmailPreviewLinks
 from okta.models.email_template_response import EmailTemplateResponse
 
 from okta_mcp_server.tools.customization.custom_templates.custom_templates import (
+    _check_no_content_response,
     _serialize,
     get_email_customization_preview,
     get_email_default_content_preview,
     list_email_customizations,
     list_email_templates,
+    send_test_email,
 )
 
 # ---------------------------------------------------------------------------
@@ -143,6 +145,273 @@ class TestSerializeEmailPreview:
         """Scalars (str, int) that have no model_dump and no __dict__ pass through."""
         assert _serialize("raw string") == "raw string"
         assert _serialize(42) == 42
+
+
+# ===========================================================================
+# _check_no_content_response — unit tests
+#
+# Reproduces the SDK empty-body bug:
+#   send_test_email / delete_email_customization / delete_all_customizations
+#   all return (None, ApiResponse(status=NNN), None) when the response body is
+#   empty — even for 401/403/5xx.  A plain `if result[-1]:` check therefore
+#   treats ANY empty-body response as success.
+#   _check_no_content_response catches this by also inspecting status_code.
+# ===========================================================================
+
+class TestCheckNoContentResponse:
+    """Unit tests for the _check_no_content_response helper."""
+
+    def _make_api_response(self, status_code: int):
+        resp = MagicMock()
+        resp.status_code = status_code
+        return resp
+
+    def test_returns_none_for_204_no_error(self):
+        """204 with no SDK error → None (success)."""
+        result = (None, self._make_api_response(204), None)
+        assert _check_no_content_response(result) is None
+
+    def test_returns_none_for_200_no_error(self):
+        """200 with no SDK error → None (success)."""
+        result = (None, self._make_api_response(200), None)
+        assert _check_no_content_response(result) is None
+
+    def test_returns_error_string_when_sdk_err_set(self):
+        """If result[-1] is a non-None error the SDK error string is returned."""
+        err = MagicMock()
+        err.__str__ = lambda self: "SDK error message"
+        result = (None, self._make_api_response(400), err)
+        assert _check_no_content_response(result) == "SDK error message"
+
+    def test_returns_error_string_for_401_empty_body(self):
+        """Regression: 401 with empty body → SDK sets err=None; helper must catch it.
+
+        This is the core SDK bug: when response_body == '', the SDK skips error
+        processing and returns (None, ApiResponse(401), None).  Without this
+        helper, result[-1] is None and the tool reports false success.
+        """
+        result = (None, self._make_api_response(401), None)
+        err_str = _check_no_content_response(result)
+        assert err_str is not None
+        assert "401" in err_str
+
+    def test_returns_error_string_for_403_empty_body(self):
+        """Same SDK bug for 403."""
+        result = (None, self._make_api_response(403), None)
+        err_str = _check_no_content_response(result)
+        assert err_str is not None
+        assert "403" in err_str
+
+    def test_returns_error_string_for_500_empty_body(self):
+        """Same SDK bug for 500."""
+        result = (None, self._make_api_response(500), None)
+        err_str = _check_no_content_response(result)
+        assert err_str is not None
+        assert "500" in err_str
+
+    def test_handles_two_tuple_result(self):
+        """Some SDK error paths return a 2-tuple; helper must not crash."""
+        err = MagicMock()
+        err.__str__ = lambda self: "two-tuple error"
+        result = (MagicMock(), err)
+        assert _check_no_content_response(result) == "two-tuple error"
+
+
+# ===========================================================================
+# send_test_email — tool tests
+#
+# Reproduces JIRA OKTA-1114952.
+#
+# Confirmed via live OAuth reproduction (15 Apr 2026):
+#   - Device Auth token (uid present, real user) → HTTP 204, success.
+#   - Client Credentials service token (uid=None) → HTTP 404 E0000007.
+#   - SSWS token used as Bearer → HTTP 401 with empty body; SDK swallows
+#     the error (result[-1] == None), old code reported false success.
+# ===========================================================================
+
+_E0000007_MSG = (
+    "Okta HTTP 404 E0000007 Not found: "
+    "Resource not found: tpqtlsnhzv@test.test (User)\n"
+)
+
+
+class TestSendTestEmail:
+    """Tests for the send_test_email MCP tool."""
+
+    # ------------------------------------------------------------------
+    # Happy path (Device Auth token, real user → HTTP 204)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_success_returns_success_dict(self, mock_get_client, ctx_no_elicitation):
+        """HTTP 204 (empty body, no error) → tool returns success dict."""
+        api_resp = MagicMock()
+        api_resp.status_code = 204
+        client = AsyncMock()
+        client.send_test_email.return_value = (None, api_resp, None)
+        mock_get_client.return_value = client
+
+        result = await send_test_email(
+            ctx=ctx_no_elicitation, brand_id=BRAND_ID, template_name=TEMPLATE_NAME
+        )
+
+        assert result == {"success": True, "message": f"Test email for '{TEMPLATE_NAME}' sent successfully."}
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_language_forwarded_to_sdk(self, mock_get_client, ctx_no_elicitation):
+        """The language parameter must be forwarded to the SDK call."""
+        api_resp = MagicMock()
+        api_resp.status_code = 204
+        client = AsyncMock()
+        client.send_test_email.return_value = (None, api_resp, None)
+        mock_get_client.return_value = client
+
+        result = await send_test_email(
+            ctx=ctx_no_elicitation, brand_id=BRAND_ID, template_name=TEMPLATE_NAME, language="es"
+        )
+
+        assert result["success"] is True
+        client.send_test_email.assert_called_once_with(BRAND_ID, TEMPLATE_NAME, language="es")
+
+    # ------------------------------------------------------------------
+    # E0000007 — Client Credentials token, no uid (confirmed via live test)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_e0000007_returns_diagnostic_message(self, mock_get_client, ctx_no_elicitation):
+        """Regression OKTA-1114952: E0000007 must return a human-readable diagnostic.
+
+        Confirmed live: Client Credentials service token (uid=None) → HTTP 404
+        E0000007.  The old code returned str(err) directly — an opaque message
+        with no guidance.  The fix returns an explanation and remediation steps.
+        """
+        err = MagicMock()
+        err.__str__ = lambda self: _E0000007_MSG
+        client = AsyncMock()
+        client.send_test_email.return_value = (MagicMock(), err)  # 2-tuple on error
+        mock_get_client.return_value = client
+
+        result = await send_test_email(
+            ctx=ctx_no_elicitation, brand_id=BRAND_ID, template_name=TEMPLATE_NAME, language="es"
+        )
+
+        assert "error" in result
+        assert "Private Key" in result["error"] or "Device Authorization" in result["error"]
+        # Must NOT be raw Python dict repr from Error.__repr__
+        assert not result["error"].startswith("{'message'")
+
+    # ------------------------------------------------------------------
+    # 401 empty-body silent failure (SSWS token used as Bearer)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_401_empty_body_is_not_reported_as_success(self, mock_get_client, ctx_no_elicitation):
+        """Regression: SDK returns (None, ApiResponse(401), None) for empty-body 401.
+
+        Confirmed live: SSWS token used with authorizationMode='Bearer' causes
+        Okta to return HTTP 401 with an empty body.  The SDK's condition
+        `if response_body == "" or response.status == 204` fires, discarding
+        the error → result[-1] is None → old code reported false success.
+        """
+        api_resp = MagicMock()
+        api_resp.status_code = 401
+        client = AsyncMock()
+        client.send_test_email.return_value = (None, api_resp, None)  # SDK silent failure
+        mock_get_client.return_value = client
+
+        result = await send_test_email(
+            ctx=ctx_no_elicitation, brand_id=BRAND_ID, template_name=TEMPLATE_NAME
+        )
+
+        assert "error" in result
+        assert "401" in result["error"]
+        assert result.get("success") is not True
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_generic_403_sdk_err_returns_error(self, mock_get_client, ctx_no_elicitation):
+        """SDK-set (body-present) 403 error is returned as a plain error string."""
+        err = MagicMock()
+        err.__str__ = lambda self: "403 Forbidden"
+        client = AsyncMock()
+        client.send_test_email.return_value = (MagicMock(), err)
+        mock_get_client.return_value = client
+
+        result = await send_test_email(
+            ctx=ctx_no_elicitation, brand_id=BRAND_ID, template_name=TEMPLATE_NAME
+        )
+
+        assert "error" in result
+        assert "403" in result["error"]
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_empty_body_403_returns_private_key_jwt_message(self, mock_get_client, ctx_no_elicitation):
+        """Regression OKTA-1114952: empty-body 403 must return the Private Key JWT diagnostic.
+
+        Confirmed live: Private Key JWT service token (uid=None) → HTTP 403
+        with empty body.  The SDK sets err=None and ApiResponse(403); the old
+        code would fall through to the generic 'expired token' message with no
+        guidance.  The fix detects 'HTTP 403' in the err_str and returns the
+        clear actionable message.
+        """
+        api_resp = MagicMock()
+        api_resp.status_code = 403
+        client = AsyncMock()
+        client.send_test_email.return_value = (None, api_resp, None)  # empty-body 403
+        mock_get_client.return_value = client
+
+        result = await send_test_email(
+            ctx=ctx_no_elicitation, brand_id=BRAND_ID, template_name=TEMPLATE_NAME
+        )
+
+        assert "error" in result
+        assert "Private Key" in result["error"] or "Device Authorization" in result["error"]
+        assert result.get("success") is not True
+
+    @pytest.mark.asyncio
+    @patch(
+        "okta_mcp_server.tools.customization.custom_templates.custom_templates.get_okta_client"
+    )
+    async def test_exception_returns_error_dict(self, mock_get_client, ctx_no_elicitation):
+        """Unhandled exceptions are caught and returned as {"error": ...}."""
+        mock_get_client.side_effect = Exception("network failure")
+
+        result = await send_test_email(
+            ctx=ctx_no_elicitation, brand_id=BRAND_ID, template_name=TEMPLATE_NAME
+        )
+
+        assert "error" in result
+        assert "network failure" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_brand_id_returns_error_without_api_call(self, ctx_no_elicitation):
+        """@validate_ids rejects invalid brand IDs before any SDK call."""
+        result = await send_test_email(
+            ctx=ctx_no_elicitation, brand_id="not valid!", template_name=TEMPLATE_NAME
+        )
+
+        assert isinstance(result, list)
+        assert any(
+            "brand_id" in str(item).lower() or "invalid" in str(item).lower()
+            for item in result
+        )
 
 
 # ===========================================================================
