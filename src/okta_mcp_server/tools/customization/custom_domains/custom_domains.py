@@ -400,18 +400,21 @@ async def upsert_custom_domain_certificate(
     manager = ctx.request_context.lifespan_context.okta_auth_manager
 
     # Validate the file path before any filesystem access.
+    # validate_file_path returns the symlink-resolved absolute path; use
+    # that resolved path for all I/O so the opened file is identical to
+    # the one that was validated (eliminates the TOCTOU window).
     try:
-        validate_file_path(private_key_file_path, "private_key_file_path")
+        safe_path = validate_file_path(private_key_file_path, "private_key_file_path")
     except InvalidFilePathError as e:
         logger.error(f"Rejected unsafe private_key_file_path: {e}")
         return {"error": str(e)}
 
     # Read the private key from a local file path so the raw PEM key
     # value is never passed through the LLM conversation.
-    if not os.path.isfile(private_key_file_path):
+    if not os.path.isfile(safe_path):
         return {"error": f"Private key file not found: {private_key_file_path!r}"}
     try:
-        with open(private_key_file_path, "r") as _fh:
+        with open(safe_path, "r") as _fh:
             private_key = _fh.read()
     except OSError as _read_err:
         logger.error(f"Failed to read private key file {private_key_file_path!r}: {_read_err}")

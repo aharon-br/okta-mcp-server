@@ -225,7 +225,11 @@ def validate_file_path(file_path: str, param_name: str = "file_path") -> str:
         param_name: Descriptive name used in error messages.
 
     Returns:
-        The validated path (unchanged if valid).
+        The symlink-resolved absolute path (``os.path.realpath``) of the
+        validated file.  Callers **must** use this returned path for all
+        subsequent I/O (``isfile``, ``open``, etc.) instead of the original
+        user-supplied value to ensure the path that is opened is identical
+        to the path that was validated, preventing TOCTOU attacks.
 
     Raises:
         InvalidFilePathError: If the path contains traversal sequences
@@ -316,7 +320,10 @@ def validate_file_path(file_path: str, param_name: str = "file_path") -> str:
             f"directories via the {ALLOWED_KEY_DIRS_ENV} environment variable."
         )
 
-    return file_path
+    # Return the symlink-resolved absolute path so callers always open the
+    # exact path that was security-checked, eliminating the TOCTOU window
+    # between validation and the subsequent open() call.
+    return real_path
 
 
 def validate_ids(*id_params: str, error_return_type: str = "list"):

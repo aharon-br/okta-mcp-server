@@ -312,18 +312,18 @@ async def upload_brand_theme_logo(
     logger.info(f"Uploading logo for theme {theme_id}, brand {brand_id}: {file_path}")
 
     try:
-        validate_file_path(file_path, "file_path")
+        safe_path = validate_file_path(file_path, "file_path")
     except InvalidFilePathError as e:
         logger.error(f"Rejected unsafe file_path for logo upload: {e}")
         return {"error": str(e)}
 
-    if not os.path.isfile(file_path):
+    if not os.path.isfile(safe_path):
         return {"error": f"File not found: {file_path}"}
 
     manager = ctx.request_context.lifespan_context.okta_auth_manager
 
     try:
-        with open(file_path, "rb") as fh:
+        with open(safe_path, "rb") as fh:
             file_bytes = fh.read()
 
         client = await get_okta_client(manager)
@@ -430,18 +430,18 @@ async def upload_brand_theme_favicon(
     logger.info(f"Uploading favicon for theme {theme_id}, brand {brand_id}: {file_path}")
 
     try:
-        validate_file_path(file_path, "file_path")
+        safe_path = validate_file_path(file_path, "file_path")
     except InvalidFilePathError as e:
         logger.error(f"Rejected unsafe file_path for favicon upload: {e}")
         return {"error": str(e)}
 
-    if not os.path.isfile(file_path):
+    if not os.path.isfile(safe_path):
         return {"error": f"File not found: {file_path}"}
 
     manager = ctx.request_context.lifespan_context.okta_auth_manager
 
     try:
-        with open(file_path, "rb") as fh:
+        with open(safe_path, "rb") as fh:
             file_bytes = fh.read()
 
         client = await get_okta_client(manager)
@@ -550,18 +550,18 @@ async def upload_brand_theme_background_image(
     logger.info(f"Uploading background image for theme {theme_id}, brand {brand_id}: {file_path}")
 
     try:
-        validate_file_path(file_path, "file_path")
+        safe_path = validate_file_path(file_path, "file_path")
     except InvalidFilePathError as e:
         logger.error(f"Rejected unsafe file_path for background image upload: {e}")
         return {"error": str(e)}
 
-    if not os.path.isfile(file_path):
+    if not os.path.isfile(safe_path):
         return {"error": f"File not found: {file_path}"}
 
     manager = ctx.request_context.lifespan_context.okta_auth_manager
 
     try:
-        with open(file_path, "rb") as fh:
+        with open(safe_path, "rb") as fh:
             file_bytes = fh.read()
 
         client = await get_okta_client(manager)

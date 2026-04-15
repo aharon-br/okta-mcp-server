@@ -274,9 +274,14 @@ class TestValidateFilePath:
     # ------------------------------------------------------------------
 
     def test_allows_tmp_path(self):
-        """/tmp paths must be accepted."""
-        result = validate_file_path("/tmp/logo.png", "file_path")
-        assert result == "/tmp/logo.png"
+        """/tmp paths must be accepted.
+
+        The returned path is the realpath-resolved form; on macOS /tmp is a
+        symlink to /private/tmp so the result may differ from the input.
+        """
+        path = "/tmp/logo.png"
+        result = validate_file_path(path, "file_path")
+        assert result == os.path.realpath(path)
 
     def test_rejects_home_directory_path(self):
         """: Home directory paths outside the allow-list must be rejected.
@@ -290,13 +295,17 @@ class TestValidateFilePath:
         assert "permitted" in str(exc_info.value).lower()
 
     def test_allows_relative_path_inside_tmp(self, monkeypatch):
-        """A relative path whose CWD-resolved real path falls inside /tmp must pass."""
+        """A relative path whose CWD-resolved real path falls inside /tmp must pass.
+
+        The returned value is the realpath-resolved absolute path so callers
+        always open the validated location regardless of CWD changes.
+        """
         # Use /tmp directly — on macOS this resolves to /private/tmp which is
         # in the default allow-list.  tempfile.gettempdir() returns the
         # per-user temp folder (/var/folders/...) which is NOT /tmp.
         monkeypatch.chdir("/tmp")
         result = validate_file_path("logo.png", "file_path")
-        assert result == "logo.png"
+        assert result == os.path.realpath(os.path.abspath("logo.png"))
 
     def test_rejects_relative_path_outside_allowed(self, monkeypatch, tmp_path):
         """A relative path that resolves outside the allow-list must be rejected."""
@@ -311,10 +320,16 @@ class TestValidateFilePath:
             validate_file_path("secrets.env", "file_path")
         assert "permitted" in str(exc_info.value).lower()
 
-    def test_returns_path_unchanged(self):
-        """validate_file_path must return the original path value when valid."""
+    def test_returns_resolved_path(self):
+        """validate_file_path must return the realpath-resolved absolute path.
+
+        The function returns ``os.path.realpath(path)`` so callers can open
+        the exact same path that was security-checked, eliminating the TOCTOU
+        window.  On macOS /tmp is a symlink to /private/tmp, so the resolved
+        path differs from the input.
+        """
         path = "/tmp/my-favicon.gif"
-        assert validate_file_path(path, "file_path") == path
+        assert validate_file_path(path, "file_path") == os.path.realpath(path)
 
     # ------------------------------------------------------------------
     # Edge cases
