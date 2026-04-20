@@ -128,6 +128,40 @@ async def get_application(ctx: Context, app_id: str, expand: Optional[str] = Non
 
 
 @mcp.tool()
+@validate_ids("app_id")
+async def list_app_groups(ctx: Context, app_id: str) -> Any:
+    """List all groups assigned to an application.
+
+    Parameters:
+        app_id (str, required): The ID of the application to retrieve group assignments for.
+
+    Returns:
+        List containing the group assignment objects (id, priority, profile) for the application.
+    """
+    logger.info(f"Listing groups assigned to application: {app_id}")
+
+    manager = ctx.request_context.lifespan_context.okta_auth_manager
+
+    try:
+        client = await get_okta_client(manager)
+        logger.debug(f"Calling Okta API to list groups for application {app_id}")
+
+        groups, _, err = await client.list_application_group_assignments(app_id)
+
+        if err:
+            logger.error(f"Okta API error while listing groups for application {app_id}: {err}")
+            return [f"Error: {err}"]
+
+        group_count = len(groups) if groups else 0
+        logger.info(f"Successfully retrieved {group_count} groups for application {app_id}")
+
+        return [g for g in groups]
+    except Exception as e:
+        logger.error(f"Exception while listing groups for application {app_id}: {type(e).__name__}: {e}")
+        return [f"Exception: {e}"]
+
+
+@mcp.tool()
 async def create_application(ctx: Context, app_config: Dict[str, Any], activate: bool = True) -> Any:
     """Create a new application in the Okta organization.
 

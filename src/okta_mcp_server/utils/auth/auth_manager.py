@@ -8,9 +8,11 @@
 # This module handles the authentication flow for Okta using the Device Authorization Grant.
 # It initiates the device authorization, polls for the access token, and manages the Okta API token lifecycle.
 
+import json
 import os
 import sys
 import time
+import uuid
 import webbrowser
 from dataclasses import dataclass, field
 
@@ -18,6 +20,8 @@ import jwt
 import keyring
 import keyring.backend
 import requests
+from jwcrypto import jwk as jwcrypto_jwk
+from jwcrypto import jwt as jwcrypto_jwt
 from loguru import logger
 
 SERVICE_NAME = "OktaAuthManager"
@@ -54,6 +58,9 @@ class OktaAuthManager:
             # Process private key if it contains escaped newlines
             if "\\n" in self.private_key:
                 self.private_key = self.private_key.replace("\\n", "\n")
+            # Generate ephemeral EC key pair for DPoP
+            self.dpop_key = jwcrypto_jwk.JWK.generate(kty="EC", crv="P-256")
+            logger.debug("DPoP key pair generated")
         else:
             if self.private_key and not self.key_id:
                 logger.warning("Private key found but OKTA_KEY_ID is missing. Using device flow instead.")
@@ -101,6 +108,22 @@ class OktaAuthManager:
             logger.error(f"Failed to generate client assertion: {e}")
             raise
 
+    def _generate_dpop_proof(self, http_method: str, url: str, nonce: str | None = None) -> str:
+        """Generate a DPoP proof JWT for the given HTTP method and URL."""
+        public_jwk = json.loads(self.dpop_key.export_public())
+        header = {"typ": "dpop+jwt", "alg": "ES256", "jwk": public_jwk}
+        payload = {
+            "jti": str(uuid.uuid4()),
+            "htm": http_method.upper(),
+            "htu": url,
+            "iat": int(time.time()),
+        }
+        if nonce:
+            payload["nonce"] = nonce
+        token = jwcrypto_jwt.JWT(header=header, claims=payload)
+        token.make_signed_token(self.dpop_key)
+        return token.serialize()
+
     def _browserless_authenticate(self) -> str | None:
         """Perform browserless authentication using client credentials with JWT assertion."""
         logger.info("Starting browserless authentication")
@@ -113,6 +136,7 @@ class OktaAuthManager:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
+            "DPoP": self._generate_dpop_proof("POST", token_url),
         }
 
         try:
@@ -130,6 +154,17 @@ class OktaAuthManager:
 
             response = requests.post(token_url, headers=headers, data=data)
             logger.debug(f"Response status code: {response.status_code}")
+
+            # If server requires a DPoP nonce, retry with the provided nonce
+            if response.status_code == 400:
+                resp_json = response.json()
+                if resp_json.get("error") == "use_dpop_nonce":
+                    dpop_nonce = response.headers.get("DPoP-Nonce")
+                    if dpop_nonce:
+                        logger.debug("Retrying with DPoP nonce")
+                        headers["DPoP"] = self._generate_dpop_proof("POST", token_url, nonce=dpop_nonce)
+                        response = requests.post(token_url, headers=headers, data=data)
+                        logger.debug(f"Retry response status code: {response.status_code}")
 
             if response.status_code == 200:
                 resp_json = response.json()

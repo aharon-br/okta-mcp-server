@@ -437,6 +437,109 @@ async def list_group_apps(group_id: str, ctx: Context = None) -> list:
 
 
 @mcp.tool()
+async def list_group_rules(
+    ctx: Context,
+    fetch_all: bool = False,
+    after: Optional[str] = None,
+    limit: Optional[int] = None,
+    search: Optional[str] = None,
+) -> dict:
+    """List all group rules (auto-assignment rules) from the Okta organization with pagination support.
+
+    Group rules automatically assign users to groups based on Okta Expression Language conditions.
+    These correspond to the `okta_group_rule` Terraform resource.
+
+    Parameters:
+        fetch_all (bool, optional): If True, automatically fetch all pages of results. Default: False.
+        after (str, optional): Pagination cursor for fetching results after this point.
+        limit (int, optional): Maximum number of rules to return per page (min 20, max 200).
+        search (str, optional): Search string to filter rules by name.
+
+    Returns:
+        Dict containing:
+        - items: List of group rule objects, each with id, name, status, conditions, and actions
+        - total_fetched: Number of rules returned
+        - has_more: Boolean indicating if more results are available
+        - next_cursor: Cursor for the next page (if has_more is True)
+        - fetch_all_used: Boolean indicating if fetch_all was used
+    """
+    logger.info("Listing group rules from Okta organization")
+    logger.debug(f"fetch_all: {fetch_all}, after: '{after}', limit: {limit}, search: '{search}'")
+
+    if limit is not None:
+        if limit < 20:
+            logger.warning(f"Limit {limit} is below minimum (20), setting to 20")
+            limit = 20
+        elif limit > 200:
+            logger.warning(f"Limit {limit} exceeds maximum (200), setting to 200")
+            limit = 200
+
+    manager = ctx.request_context.lifespan_context.okta_auth_manager
+
+    try:
+        client = await get_okta_client(manager)
+        query_params = build_query_params(search=search, after=after, limit=limit)
+
+        logger.debug("Calling Okta API to list group rules")
+        rules, response, err = await client.list_group_rules(query_params)
+
+        if err:
+            logger.error(f"Okta API error while listing group rules: {err}")
+            return {"error": f"Error: {err}"}
+
+        if not rules:
+            logger.info("No group rules found")
+            return create_paginated_response([], response, fetch_all)
+
+        if fetch_all and response and hasattr(response, "has_next") and response.has_next():
+            logger.info(f"fetch_all=True, auto-paginating from initial {len(rules)} rules")
+            all_rules, pagination_info = await paginate_all_results(response, rules)
+            logger.info(
+                f"Successfully retrieved {len(all_rules)} group rules across {pagination_info['pages_fetched']} pages"
+            )
+            return create_paginated_response(all_rules, response, fetch_all_used=True, pagination_info=pagination_info)
+        else:
+            logger.info(f"Successfully retrieved {len(rules)} group rules")
+            return create_paginated_response(rules, response, fetch_all_used=fetch_all)
+
+    except Exception as e:
+        logger.error(f"Exception while listing group rules: {type(e).__name__}: {e}")
+        return {"error": f"Exception: {e}"}
+
+
+@mcp.tool()
+@validate_ids("rule_id")
+async def get_group_rule(rule_id: str, ctx: Context = None) -> list:
+    """Get a group rule by ID from the Okta organization.
+
+    Parameters:
+        rule_id (str, required): The ID of the group rule to retrieve.
+
+    Returns:
+        List containing the group rule details (id, name, status, conditions, actions).
+    """
+    logger.info(f"Getting group rule with ID: {rule_id}")
+
+    manager = ctx.request_context.lifespan_context.okta_auth_manager
+
+    try:
+        client = await get_okta_client(manager)
+        logger.debug(f"Calling Okta API to get group rule {rule_id}")
+
+        rule, _, err = await client.get_group_rule(rule_id)
+
+        if err:
+            logger.error(f"Okta API error while getting group rule {rule_id}: {err}")
+            return [f"Error: {err}"]
+
+        logger.info(f"Successfully retrieved group rule: {rule_id}")
+        return [rule]
+    except Exception as e:
+        logger.error(f"Exception while getting group rule {rule_id}: {type(e).__name__}: {e}")
+        return [f"Exception: {e}"]
+
+
+@mcp.tool()
 @validate_ids("group_id", "user_id")
 async def add_user_to_group(group_id: str, user_id: str, ctx: Context = None) -> list:
     """Add a user to a group by ID in the Okta organization.
